@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -50,6 +53,26 @@ class KindleDevice:
         self._transport: str = "none"
         self._mtp_install_attempted = False
         self._mtp_tools_available: Optional[bool] = None
+        self._mtp_last_probe_at: float = 0.0
+        self._mtp_last_probe_ok: bool = False
+        self._mtp_probe_interval_sec: float = 5.0
+        self._mtp_last_seen_at: float = 0.0
+        self._mtp_hold_connected_sec: float = 20.0
+        self._debug_enabled = (
+            os.environ.get("HEARTH_MTP_DEBUG", "1").strip().lower()
+            not in {"0", "false", "off", "no"}
+        )
+
+    def _debug(self, message: str) -> None:
+        """Print MTP debug logs to terminal stderr."""
+        if not self._debug_enabled:
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(
+            f"[Hearth MTP {timestamp}] {message}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def is_connected(self) -> bool:
         """Check if Kindle is connected over MTP, then USB mass storage."""
@@ -127,7 +150,9 @@ class KindleDevice:
             if not self.ensure_hearth_folder_exists():
                 return False
             for remote_dir in self._mtp_hearth_candidates():
-                if self._run_mtp_connect(["--sendfile", f"{file_path},{remote_dir}"]):
+                if self._run_mtp_connect(
+                    ["--sendfile", f"{file_path},{remote_dir}"]
+                ):
                     return True
             return False
 
@@ -147,10 +172,14 @@ class KindleDevice:
         """Load Hearth metadata from Kindle."""
         if self._detect_mtp_kindle():
             for remote_hearth in self._mtp_hearth_candidates():
-                local_tmp_dir = Path(tempfile.mkdtemp(prefix="hearth_mtp_meta_"))
+                local_tmp_dir = Path(
+                    tempfile.mkdtemp(prefix="hearth_mtp_meta_")
+                )
                 local_file = local_tmp_dir / self.KINDLE_METADATA_FILE
                 remote_file = f"{remote_hearth}/{self.KINDLE_METADATA_FILE}"
-                ok = self._run_mtp_connect(["--getfile", f"{remote_file},{local_file}"])
+                ok = self._run_mtp_connect(
+                    ["--getfile", f"{remote_file},{local_file}"]
+                )
                 if not ok or not local_file.exists():
                     continue
                 try:
@@ -160,7 +189,10 @@ class KindleDevice:
                         encoding="utf-8",
                     ) as file_handle:
                         data = json.load(file_handle)
-                    return {key: KindleMetadata(**value) for key, value in data.items()}
+                    return {
+                        key: KindleMetadata(**value)
+                        for key, value in data.items()
+                    }
                 except (OSError, json.JSONDecodeError, TypeError):
                     return {}
             return {}
@@ -176,7 +208,10 @@ class KindleDevice:
         try:
             with open(metadata_file, "r", encoding="utf-8") as file_handle:
                 data = json.load(file_handle)
-            return {key: KindleMetadata(**value) for key, value in data.items()}
+            return {
+                key: KindleMetadata(**value)
+                for key, value in data.items()
+            }
         except (OSError, json.JSONDecodeError, TypeError):
             return {}
 
@@ -208,7 +243,9 @@ class KindleDevice:
                 return False
 
             for remote_dir in self._mtp_hearth_candidates():
-                if self._run_mtp_connect(["--sendfile", f"{local_file},{remote_dir}"]):
+                if self._run_mtp_connect(
+                    ["--sendfile", f"{local_file},{remote_dir}"]
+                ):
                     return True
             return False
 
@@ -273,7 +310,9 @@ class KindleDevice:
                         "name": path.name,
                         "is_dir": path.is_dir(),
                         "size": stat.st_size if path.is_file() else 0,
-                        "mod_time": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        "mod_time": datetime.fromtimestamp(
+                            stat.st_mtime
+                        ).isoformat(),
                     }
                 )
             except OSError:
@@ -304,7 +343,9 @@ class KindleDevice:
         elif system == "Linux":
             for root in [Path("/run/media"), Path("/media"), Path("/mnt")]:
                 if root.exists():
-                    potential_paths.extend([p for p in root.rglob("*") if p.is_dir()])
+                    potential_paths.extend(
+                        [p for p in root.rglob("*") if p.is_dir()]
+                    )
 
         for path in potential_paths:
             if self._is_kindle_device(path):
@@ -327,19 +368,70 @@ class KindleDevice:
 
     def _detect_mtp_kindle(self) -> bool:
         """Detect Kindle via libmtp tooling and set active transport."""
+        now = time.monotonic()
+
+        if self._transport == "mtp-libmtp" and (
+            now - self._mtp_last_seen_at
+        ) < self._mtp_hold_connected_sec:
+            return True
+
+        if (now - self._mtp_last_probe_at) < self._mtp_probe_interval_sec:
+            if self._mtp_last_probe_ok:
+                self._mtp_last_seen_at = now
+                self._transport = "mtp-libmtp"
+            return self._mtp_last_probe_ok
+
+        self._mtp_last_probe_at = now
+
         if not self._ensure_mtp_tools_available():
+            self._mtp_last_probe_ok = False
             return False
 
-        result = self._run_command(["mtp-detect"], timeout=60)
-        if not result:
-            return False
+        usb_snapshot = self._read_usb_snapshot()
+        if not self._contains_kindle_signature(usb_snapshot):
+            if (
+                self._transport == "mtp-libmtp"
+                and (now - self._mtp_last_seen_at)
+                < self._mtp_hold_connected_sec
+            ):
+                self._debug(
+                    "Keeping MTP connection sticky after transient miss"
+                )
+                self._mtp_last_probe_ok = True
+                return True
 
-        combined = f"{result.stdout}\n{result.stderr}"
-        if not self._contains_kindle_signature(combined):
+            self._debug("USB snapshot did not match Kindle signature")
+            self._mtp_last_probe_ok = False
+            self._transport = "none"
             return False
 
         self._transport = "mtp-libmtp"
+        self._mtp_last_probe_ok = True
+        self._mtp_last_seen_at = now
+        self._debug("Detected Kindle USB signature for MTP transport")
         return True
+
+    def _read_usb_snapshot(self) -> str:
+        """Read non-invasive USB details for Kindle signature matching."""
+        commands = []
+        if platform.system() == "Darwin":
+            commands = [
+                ["ioreg", "-p", "IOUSB", "-w0", "-l"],
+                ["system_profiler", "SPUSBDataType"],
+            ]
+        elif platform.system() == "Linux":
+            commands = [["lsusb"]]
+        else:
+            commands = []
+
+        for command in commands:
+            result = self._run_command(command, timeout=20)
+            if not result:
+                continue
+            combined = f"{result.stdout}\n{result.stderr}"
+            if combined.strip():
+                return combined
+        return ""
 
     def _contains_kindle_signature(self, text: str) -> bool:
         """Return True if command output looks like a Kindle device."""
@@ -361,23 +453,28 @@ class KindleDevice:
         required = ["mtp-detect", "mtp-connect", "mtp-filetree"]
         if all(shutil.which(cmd) for cmd in required):
             self._mtp_tools_available = True
+            self._debug("libmtp tools found in PATH")
             return True
 
         if not self.auto_install_mtp_backend:
             self._mtp_tools_available = False
+            self._debug("libmtp tools missing and auto-install is disabled")
             return False
 
         if platform.system() != "Darwin":
             self._mtp_tools_available = False
+            self._debug("libmtp auto-install supported only on macOS")
             return False
 
         if self._mtp_install_attempted:
             self._mtp_tools_available = False
+            self._debug("libmtp auto-install already attempted")
             return False
 
         self._mtp_install_attempted = True
         if not shutil.which("brew"):
             self._mtp_tools_available = False
+            self._debug("Homebrew not found; cannot auto-install libmtp")
             return False
 
         install = self._run_command(
@@ -386,9 +483,14 @@ class KindleDevice:
         )
         if not install or install.returncode != 0:
             self._mtp_tools_available = False
+            self._debug("brew install libmtp failed")
             return False
 
         self._mtp_tools_available = all(shutil.which(cmd) for cmd in required)
+        if self._mtp_tools_available:
+            self._debug("libmtp tools installed successfully")
+        else:
+            self._debug("libmtp install completed but tools still missing")
         return bool(self._mtp_tools_available)
 
     def _run_command(
@@ -397,27 +499,40 @@ class KindleDevice:
         timeout: int,
     ) -> Optional[subprocess.CompletedProcess[str]]:
         """Run a subprocess command safely and return result."""
+        self._debug(f"Running command: {' '.join(command)}")
         try:
-            return subprocess.run(
+            result = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
                 check=False,
             )
+            stdout = (result.stdout or "").strip()
+            stderr = (result.stderr or "").strip()
+            if stdout:
+                self._debug(f"stdout: {stdout[:1200]}")
+            if stderr:
+                self._debug(f"stderr: {stderr[:1200]}")
+            self._debug(f"exit={result.returncode}")
+            return result
         except (OSError, subprocess.SubprocessError):
+            self._debug("command failed to execute")
             return None
 
     def _run_mtp_connect(self, args: List[str]) -> bool:
         """Run mtp-connect command and return success."""
         result = self._run_command(["mtp-connect", *args], timeout=180)
         if not result or result.returncode != 0:
+            self._debug("mtp-connect call failed")
             return False
 
         output = f"{result.stdout}\n{result.stderr}".lower()
         if "no devices" in output:
+            self._debug("mtp-connect reports no devices")
             return False
         if "error" in output and "new folder created" not in output:
+            self._debug("mtp-connect returned error output")
             return False
         return True
 
@@ -432,7 +547,10 @@ class KindleDevice:
         """Parse mtp-filetree output into a file-tree structure."""
         result = self._run_command(["mtp-filetree"], timeout=300)
         if not result or result.returncode != 0:
-            return []
+            self._debug(
+                "mtp-filetree failed; trying mtp-connect --files fallback"
+            )
+            return self._list_file_tree_from_mtp_files()
 
         rows: List[tuple[int, str]] = []
         for raw in (result.stdout or "").splitlines():
@@ -465,6 +583,45 @@ class KindleDevice:
                     "full_path": full_path,
                     "name": name,
                     "is_dir": is_dir,
+                    "size": 0,
+                    "mod_time": "",
+                }
+            )
+
+        return entries
+
+    def _list_file_tree_from_mtp_files(self) -> List[Dict[str, object]]:
+        """Fallback listing based on mtp-connect --files output."""
+        result = self._run_command(["mtp-connect", "--files"], timeout=300)
+        if not result or result.returncode != 0:
+            return []
+
+        entries: List[Dict[str, object]] = []
+        for raw in (result.stdout or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            lower = line.lower()
+            if (
+                lower.startswith("libmtp version")
+                or lower.startswith("listing raw device")
+                or lower.startswith("attempting to connect")
+                or lower.startswith("device ")
+                or lower.startswith("ok.")
+            ):
+                continue
+
+            name = line
+            filename_match = re.search(r"filename\s*:\s*(.+)$", line, re.I)
+            if filename_match:
+                name = filename_match.group(1).strip()
+
+            full_path = "/" + name.strip("/")
+            entries.append(
+                {
+                    "full_path": full_path,
+                    "name": name,
+                    "is_dir": False,
                     "size": 0,
                     "mod_time": "",
                 }

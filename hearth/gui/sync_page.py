@@ -320,6 +320,17 @@ class SyncPage(QWidget):
         """Load list of books already installed on Kindle."""
         self.installed_book_ids = set()
         if self.sync_manager.kindle:
+            if not self.sync_manager.is_kindle_connected():
+                self.log_output("Kindle not connected; skipping installed-book scan")
+                return
+
+            transport = self.sync_manager.kindle.get_transport()
+            if transport == "mtp-libmtp":
+                self.log_output(
+                    "MTP transport active; skipping startup metadata scan"
+                )
+                return
+
             metadata = self.sync_manager.kindle.load_metadata()
             self.installed_book_ids = set(metadata.keys())
 
