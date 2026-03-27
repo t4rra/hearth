@@ -191,9 +191,7 @@ class SyncPage(QWidget):
         """Check connection status."""
         self.log_output("Checking connection status...")
         worker = self._start_worker("check_connection")
-        worker.startup_status_loaded.connect(
-            self.on_startup_status_loaded
-        )
+        worker.startup_status_loaded.connect(self.on_startup_status_loaded)
         worker.finished.connect(self.on_connection_checked)
 
     def on_startup_status_loaded(self, status: dict):

@@ -110,9 +110,7 @@ class KCCConverter(BaseConverter):
         if script_path.exists():
             return script_path
 
-        auto_fetch = (
-            os.environ.get("HEARTH_KCC_AUTO_FETCH", "1").strip().lower()
-        )
+        auto_fetch = os.environ.get("HEARTH_KCC_AUTO_FETCH", "1").strip().lower()
         if auto_fetch in {"0", "false", "off", "no"}:
             return None
 
@@ -326,8 +324,7 @@ class KCCConverter(BaseConverter):
             issues.append("kcc-c2e.py missing in KCC repo")
         if missing_python_modules:
             issues.append(
-                "Missing KCC Python dependencies: "
-                + ", ".join(missing_python_modules)
+                "Missing KCC Python dependencies: " + ", ".join(missing_python_modules)
             )
         if not seven_zip_available:
             issues.append("7z not found (needed for some comic archives)")
@@ -430,9 +427,12 @@ class KCCConverter(BaseConverter):
 
             # If manga flag is unsupported by an unexpected KCC variant,
             # retry once without manga mode.
-            if manga_rtl and result.returncode != 0 and "unrecognized" in (
-                (result.stderr or result.stdout).lower()
-            ) and "-m" in cmd:
+            if (
+                manga_rtl
+                and result.returncode != 0
+                and "unrecognized" in ((result.stderr or result.stdout).lower())
+                and "-m" in cmd
+            ):
                 self._log_progress(
                     "KCC manga flag not supported by this build; retrying without it"
                 )
