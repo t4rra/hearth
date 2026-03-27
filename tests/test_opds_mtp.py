@@ -1,20 +1,12 @@
-"""Tests for OPDS authentication and MTP detection logic."""
+"""Tests for OPDS authentication and libmtp Kindle detection logic."""
 
-import unittest
-from unittest.mock import Mock, patch
 import tempfile
+import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from hearth.core.opds_client import OPDSClient
 from hearth.sync.kindle_device import KindleDevice
-
-
-class KindleDeviceForTest(KindleDevice):
-    """Test helper exposing a safe way to switch transport mode."""
-
-    def activate_mtp_api(self) -> bool:
-        self._transport = "mtp-api"
-        return True
 
 
 class TestOPDSAuthentication(unittest.TestCase):
@@ -79,69 +71,60 @@ class TestOPDSAuthentication(unittest.TestCase):
 
 
 class TestKindleMTPDetection(unittest.TestCase):
-    """Verify MTP detection behavior on macOS."""
+    """Verify libmtp-first detection and command flow."""
 
-    def test_is_connected_reports_mtp_on_macos(self):
-        device = KindleDeviceForTest()
+    def test_is_connected_prefers_mtp_first(self):
+        device = KindleDevice()
 
-        with patch(
-            "hearth.sync.kindle_device.platform.system",
-            return_value="Darwin",
+        with patch.object(device, "_detect_mtp_kindle", return_value=True):
+            with patch.object(device, "_detect_usb_kindle") as usb:
+                self.assertTrue(device.is_connected())
+                usb.assert_not_called()
+
+    def test_get_mount_path_returns_none_when_mtp_connected(self):
+        device = KindleDevice()
+        with patch.object(device, "_detect_mtp_kindle", return_value=True):
+            self.assertIsNone(device.get_mount_path())
+
+    def test_mtp_detection_sets_transport(self):
+        device = KindleDevice()
+
+        fake = Mock()
+        fake.stdout = "Vendor id: 0x1949\nAmazon Kindle"
+        fake.stderr = ""
+        fake.returncode = 0
+
+        with patch.object(
+            device,
+            "_ensure_mtp_tools_available",
+            return_value=True,
         ):
-            with patch.object(device, "_detect_usb_kindle", return_value=None):
-                with patch.object(
-                    device,
-                    "_read_command_output",
-                    side_effect=["Some USB\nAmazon Kindle\n", ""],
-                ):
-                    with patch.object(
-                        device,
-                        "_ensure_mtp_api_ready",
-                        side_effect=device.activate_mtp_api,
-                    ):
-                        self.assertTrue(device.is_connected())
-                        self.assertEqual(device.get_transport(), "mtp-api")
+            with patch.object(device, "_run_command", return_value=fake):
+                self.assertTrue(device.is_connected())
 
-    def test_get_mount_path_returns_none_for_mtp_api(self):
-        device = KindleDeviceForTest()
+        self.assertEqual(device.get_transport(), "mtp-libmtp")
 
-        with patch.object(device, "_detect_usb_kindle", return_value=None):
-            with patch.object(device, "_detect_mtp_device", return_value=True):
-                with patch.object(
-                    device,
-                    "_ensure_mtp_api_ready",
-                    side_effect=device.activate_mtp_api,
-                ):
-                    self.assertIsNone(device.get_mount_path())
-                    self.assertEqual(device.get_transport(), "mtp-api")
+    def test_ensure_hearth_folder_uses_newfolder(self):
+        device = KindleDevice()
 
-    def test_preferred_tool_kept_in_constructor(self):
-        device = KindleDevice(preferred_mtp_tool="go-mtpx")
-        self.assertEqual(device.preferred_mtp_tool, "go-mtpx")
-
-    def test_ensure_hearth_folder_uses_api_mkdir(self):
-        device = KindleDeviceForTest()
-        device.activate_mtp_api()
-
-        with patch.object(device, "get_mount_path", return_value=None):
+        with patch.object(device, "_detect_mtp_kindle", return_value=True):
             with patch.object(
                 device,
-                "_mtp_api_call",
-                return_value="",
+                "_run_mtp_connect",
+                return_value=True,
             ) as call:
                 self.assertTrue(device.ensure_hearth_folder_exists())
 
-        call.assert_called_once_with(["mkdir", "/documents/Hearth"])
+        self.assertEqual(call.call_args.args[0][0], "--newfolder")
 
-    def test_copy_to_kindle_uses_api_upload(self):
-        device = KindleDeviceForTest()
-        device.activate_mtp_api()
+    def test_copy_to_kindle_uses_sendfile(self):
+        device = KindleDevice()
 
         with tempfile.TemporaryDirectory(prefix="hearth_mtp_test_") as tmp:
             file_path = Path(tmp) / "book.mobi"
             file_path.write_bytes(b"abc")
 
-            with patch.object(device, "get_mount_path", return_value=None):
+            with patch.object(device, "_detect_mtp_kindle", return_value=True):
                 with patch.object(
                     device,
                     "ensure_hearth_folder_exists",
@@ -149,12 +132,12 @@ class TestKindleMTPDetection(unittest.TestCase):
                 ):
                     with patch.object(
                         device,
-                        "_mtp_api_call",
-                        return_value="",
+                        "_run_mtp_connect",
+                        return_value=True,
                     ) as call:
                         self.assertTrue(device.copy_to_kindle(file_path))
 
-            self.assertEqual(call.call_args.args[0][0], "upload")
+            self.assertEqual(call.call_args.args[0][0], "--sendfile")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QGroupBox,
+    QMessageBox,
 )
 
 from ..core.config import SettingsManager
@@ -206,9 +207,26 @@ class SettingsPage(QWidget):
             preferred_mtp_tool=self.mtp_tool.currentText(),
             auto_install_mtp_backend=self.mtp_auto_install.isChecked(),
         )
+        if device.is_connected() and device.get_transport() == "mtp-libmtp":
+            self.kindle_path.setText("")
+            QMessageBox.information(
+                self,
+                "Kindle Detected",
+                "Detected Kindle over MTP. No mount path is required.",
+            )
+            return
+
         path = device.get_mount_path()
         if path:
             self.kindle_path.setText(str(path))
+            return
+
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select Mounted Kindle",
+        )
+        if selected:
+            self.kindle_path.setText(selected)
 
     def _update_auth_visibility(self, auth_type: str):
         """Show only fields relevant to selected OPDS auth mode."""

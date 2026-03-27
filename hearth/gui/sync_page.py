@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QTextEdit,
     QMessageBox,
+    QFileDialog,
     QTreeWidget,
     QTreeWidgetItem,
 )
@@ -325,12 +326,21 @@ class SyncPage(QWidget):
     def sync_selected(self):
         """Sync selected books to Kindle."""
         if not self.sync_manager.is_kindle_connected():
-            msg = (
-                "Kindle device not connected. "
-                "Please connect and configure in Settings."
-            )
-            QMessageBox.warning(self, "Error", msg)
-            return
+            self.log_output("No MTP Kindle detected; requesting mounted Kindle path...")
+            if not self._prompt_for_mounted_kindle():
+                msg = (
+                    "Kindle device not connected. "
+                    "Please connect and configure in Settings."
+                )
+                QMessageBox.warning(self, "Error", msg)
+                return
+            if not self.sync_manager.is_kindle_connected():
+                msg = (
+                    "Could not access the selected Kindle mount path. "
+                    "Please choose the Kindle root folder."
+                )
+                QMessageBox.warning(self, "Error", msg)
+                return
 
         books_to_sync = self._get_checked_books_from_tree()
         if not books_to_sync:
@@ -385,3 +395,18 @@ class SyncPage(QWidget):
         """Add message to output log."""
         self.output_log.moveCursor(QTextCursor.MoveOperation.End)
         self.output_log.insertPlainText(message + "\n")
+
+    def _prompt_for_mounted_kindle(self) -> bool:
+        """Prompt user to select mounted Kindle when MTP is unavailable."""
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select Mounted Kindle",
+        )
+        if not selected:
+            return False
+
+        self.settings_manager.update_settings(kindle_mount_path=selected)
+        self.sync_manager = SyncManager(self.settings_manager)
+        self.sync_manager.set_progress_callback(self.log_output)
+        self.log_output(f"Using mounted Kindle path: {selected}")
+        return True
