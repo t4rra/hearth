@@ -1,2 +1,4 @@
 DEMO Files
 .venv
+*/__pycache__
+*.pyc
