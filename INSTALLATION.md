@@ -58,13 +58,22 @@ brew install calibre
 
 KCC (Kindle Comic Converter) is required for converting CBZ (comic) files to Kindle format.
 
-1. Install via pip:
+1. KCC is included in Hearth Python dependencies (installed in Step 8).
+
+2. If you need to install it manually:
 
 ```bash
-pip3 install KindleComicConverter
+pip3 install kcc-comic2ebook
 ```
 
-2. If this fails, try the alternative method using Homebrew:
+3. Hearth can also try to auto-install KCC at conversion time when missing.
+   Disable this behavior with:
+
+```bash
+export HEARTH_AUTO_INSTALL_KCC=0
+```
+
+4. If pip install fails, try the alternative method using Homebrew:
 
 ```bash
 brew tap scott0107/personal

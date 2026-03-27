@@ -32,7 +32,7 @@ class HearthMainWindow(QMainWindow):
         self.settings_page = SettingsPage()
         self.converter_page = ConverterPage()
         self.sync_page = SyncPage()
-        self.kindle_files_page = KindleFilesPage()
+        self.kindle_files_page = KindleFilesPage(self.sync_page.sync_manager.kindle)
 
         self.tabs.addTab(self.settings_page, "Settings")
         self.tabs.addTab(self.converter_page, "Converter")

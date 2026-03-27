@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QTreeWidget,
     QTreeWidgetItem,
+    QMenu,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QTextCursor, QColor, QBrush
@@ -26,6 +27,7 @@ class SyncWorker(QThread):
     finished = pyqtSignal(bool, str)
     books_loaded = pyqtSignal(list)
     collections_loaded = pyqtSignal(list)
+    startup_status_loaded = pyqtSignal(dict)
 
     def __init__(self, sync_manager, operation, collection=None):
         super().__init__()
@@ -61,11 +63,20 @@ class SyncWorker(QThread):
                     self.finished.emit(False, msg)
 
             elif self.operation == "check_connection":
-                opds_ok = self.sync_manager.is_opds_configured()
-                kindle_ok = self.sync_manager.is_kindle_connected()
+                status = self.sync_manager.get_startup_status()
+                self.startup_status_loaded.emit(status)
+                opds_ok = bool(status.get("opds_configured"))
+                kindle_ok = bool(status.get("kindle_connected"))
+                calibre_ok = bool(status.get("calibre_available"))
+                kcc_ok = bool((status.get("kcc") or {}).get("ready"))
                 opds_icon = "✓" if opds_ok else "✗"
                 kindle_icon = "✓" if kindle_ok else "✗"
-                msg = f"OPDS: {opds_icon} | " f"Kindle: {kindle_icon}"
+                calibre_icon = "✓" if calibre_ok else "✗"
+                kcc_icon = "✓" if kcc_ok else "✗"
+                msg = (
+                    f"OPDS: {opds_icon} | Kindle: {kindle_icon} | "
+                    f"Calibre: {calibre_icon} | KCC: {kcc_icon}"
+                )
                 self.finished.emit(opds_ok and kindle_ok, msg)
 
         except (AttributeError, RuntimeError, ConnectionError, OSError) as error:
@@ -80,13 +91,50 @@ class SyncPage(QWidget):
         self.settings_manager = SettingsManager()
         self.sync_manager = SyncManager(self.settings_manager)
         self.sync_worker = None
+        self._active_workers = []
         self.collections = []
         self.books_by_id = {}
         self.installed_book_ids = set()
+        self.desired_book_ids = set()
+        self.sync_status_by_id = {}
         self._tree_nodes_by_path = {}
         self._library_root_item = None
+        self._startup_status_logged = False
         self.init_ui()
+        self.check_connection()
         self.fetch_collections()
+
+    def _start_worker(self, operation: str, collection=None) -> SyncWorker:
+        """Create and start a tracked worker thread."""
+        worker = SyncWorker(self.sync_manager, operation, collection)
+        self.sync_worker = worker
+        self._active_workers.append(worker)
+        worker.finished.connect(
+            lambda _success, _message, w=worker: self._cleanup_worker(w)
+        )
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        return worker
+
+    def _cleanup_worker(self, worker: SyncWorker) -> None:
+        """Remove completed worker from active list."""
+        if worker in self._active_workers:
+            self._active_workers.remove(worker)
+
+    def _stop_all_workers(self) -> None:
+        """Stop any running workers before widget teardown."""
+        for worker in list(self._active_workers):
+            if worker.isRunning():
+                worker.quit()
+                if not worker.wait(1500):
+                    worker.terminate()
+                    worker.wait(500)
+            self._cleanup_worker(worker)
+
+    def closeEvent(self, event):
+        """Ensure no background QThreads survive widget destruction."""
+        self._stop_all_workers()
+        super().closeEvent(event)
 
     def init_ui(self):
         """Initialize UI elements."""
@@ -111,6 +159,11 @@ class SyncPage(QWidget):
         # Collections tree (for Collections view)
         self.collections_tree = QTreeWidget()
         self.collections_tree.setHeaderLabels(["Library", "Status"])
+        context_menu_policy = Qt.ContextMenuPolicy.CustomContextMenu
+        self.collections_tree.setContextMenuPolicy(context_menu_policy)
+        self.collections_tree.customContextMenuRequested.connect(
+            self.on_tree_context_menu
+        )
         layout.addWidget(self.collections_tree)
 
         # Buttons
@@ -137,14 +190,54 @@ class SyncPage(QWidget):
     def check_connection(self):
         """Check connection status."""
         self.log_output("Checking connection status...")
-        self.sync_worker = SyncWorker(self.sync_manager, "check_connection")
-        self.sync_worker.finished.connect(self.on_connection_checked)
-        self.sync_worker.start()
+        worker = self._start_worker("check_connection")
+        worker.startup_status_loaded.connect(
+            self.on_startup_status_loaded
+        )
+        worker.finished.connect(self.on_connection_checked)
+
+    def on_startup_status_loaded(self, status: dict):
+        """Handle startup diagnostic payload from worker."""
+        self._log_startup_status(status)
 
     def on_connection_checked(self, _success: bool, message: str):
         """Handle connection check result."""
         self.status_label.setText(message)
         self.log_output(f"Connection check: {message}")
+
+    def _log_startup_status(self, status: dict) -> None:
+        """Render startup dependency diagnostics in the sync log."""
+        if self._startup_status_logged:
+            self.log_output("Startup status refreshed")
+        else:
+            self.log_output("Startup status")
+            self._startup_status_logged = True
+
+        def icon(value: bool) -> str:
+            return "✓" if value else "✗"
+
+        opds_ok = bool(status.get("opds_configured"))
+        kindle_ok = bool(status.get("kindle_connected"))
+        calibre_ok = bool(status.get("calibre_available"))
+        kcc_status = status.get("kcc") or {}
+        kcc_ok = bool(kcc_status.get("ready"))
+
+        self.log_output(f"  {icon(opds_ok)} OPDS configured")
+        self.log_output(f"  {icon(kindle_ok)} Kindle connected")
+        self.log_output(f"  {icon(calibre_ok)} Calibre available")
+        self.log_output(f"  {icon(kcc_ok)} KCC available")
+
+        kcc_command = kcc_status.get("command_text") or ""
+        if kcc_command:
+            self.log_output(f"  KCC command: {kcc_command}")
+
+        repo_dir = kcc_status.get("repo_dir") or ""
+        if repo_dir:
+            self.log_output(f"  KCC repo dir: {repo_dir}")
+
+        issues = kcc_status.get("issues") or []
+        for issue in issues:
+            self.log_output(f"  KCC issue: {issue}")
 
     def fetch_collections(self):
         """Fetch collections from OPDS server."""
@@ -154,10 +247,9 @@ class SyncPage(QWidget):
             return
 
         self.log_output("Fetching collections from OPDS server...")
-        self.sync_worker = SyncWorker(self.sync_manager, "fetch_collections")
-        self.sync_worker.finished.connect(self.on_collections_fetched)
-        self.sync_worker.collections_loaded.connect(self.display_collections)
-        self.sync_worker.start()
+        worker = self._start_worker("fetch_collections")
+        worker.finished.connect(self.on_collections_fetched)
+        worker.collections_loaded.connect(self.display_collections)
 
     def on_collections_fetched(self, _success: bool, message: str):
         """Handle collections fetch completion."""
@@ -209,20 +301,33 @@ class SyncPage(QWidget):
                     continue
                 self.books_by_id[book.id] = book
                 is_installed = book.id in self.installed_book_ids
+                is_desired = book.id in self.desired_book_ids
+                sync_status = self.sync_status_by_id.get(book.id, "")
 
                 if self._has_book_child(collection_item, book.id):
                     continue
 
                 # Create badge for each book
-                if is_installed:
+                if is_desired and is_installed:
+                    badge = "✓ WANTED · ON DEVICE"
+                    book_display = book.title
+                elif is_desired and not is_installed:
+                    if sync_status == "syncing":
+                        badge = "⟳ WANTED · SYNCING"
+                    else:
+                        badge = "⚠ WANTED · NOT SYNCED"
+                    book_display = book.title
+                elif is_installed:
                     badge = "✓ ON DEVICE"
-                    book_display = f"{book.title}"
+                    book_display = book.title
                 else:
                     badge = ""
                     book_display = book.title
 
                 book_item = QTreeWidgetItem([book_display, badge])
                 self._set_checkable(book_item)
+                if is_desired:
+                    book_item.setCheckState(0, Qt.CheckState.Checked)
                 book_item.setData(0, Qt.ItemDataRole.UserRole, book.id)
                 book_item.setData(
                     0,
@@ -319,20 +424,21 @@ class SyncPage(QWidget):
     def _load_installed_books(self):
         """Load list of books already installed on Kindle."""
         self.installed_book_ids = set()
+        self.desired_book_ids = set()
+        self.sync_status_by_id = {}
+
         if self.sync_manager.kindle:
             if not self.sync_manager.is_kindle_connected():
                 self.log_output("Kindle not connected; skipping installed-book scan")
                 return
 
-            transport = self.sync_manager.kindle.get_transport()
-            if transport == "mtp-libmtp":
-                self.log_output(
-                    "MTP transport active; skipping startup metadata scan"
-                )
-                return
-
             metadata = self.sync_manager.kindle.load_metadata()
-            self.installed_book_ids = set(metadata.keys())
+            for book_id, meta in metadata.items():
+                if meta.desired_sync:
+                    self.desired_book_ids.add(book_id)
+                if meta.on_device or meta.sync_status == "on_device":
+                    self.installed_book_ids.add(book_id)
+                self.sync_status_by_id[book_id] = meta.sync_status
 
     def sync_selected(self):
         """Sync selected books to Kindle."""
@@ -359,10 +465,15 @@ class SyncPage(QWidget):
             QMessageBox.warning(self, "Error", msg)
             return
 
+        self.sync_manager.mark_books_desired_for_sync(books_to_sync)
+
         self.log_output(f"Starting sync of {len(books_to_sync)} book(s)...")
 
         for book in books_to_sync:
-            self.sync_manager.sync_book(book)
+            self.sync_manager.sync_book(
+                book,
+                dependency_prompt_callback=self._prompt_dependency_action,
+            )
 
     def _get_checked_books_from_tree(self):
         """Collect checked books in collection tree, deduplicated by ID."""
@@ -421,3 +532,126 @@ class SyncPage(QWidget):
         self.sync_manager.set_progress_callback(self.log_output)
         self.log_output(f"Using mounted Kindle path: {selected}")
         return True
+
+    def on_tree_context_menu(self, position):
+        """Handle right-click context menu on tree items."""
+        item = self.collections_tree.itemAt(position)
+        if not item:
+            return
+
+        node_type = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        if node_type != "book":
+            return
+
+        book_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if not book_id:
+            return
+
+        book = self.books_by_id.get(book_id)
+        if not book:
+            return
+
+        # Only show actions for installed books
+        if book_id not in self.installed_book_ids:
+            return
+
+        menu = QMenu(self)
+
+        resync_action = menu.addAction("Re-Sync to Kindle")
+        resync_action.triggered.connect(lambda: self.resync_book(book))
+
+        delete_action = menu.addAction("Delete from Kindle")
+        delete_action.triggered.connect(lambda: self.delete_book(book))
+
+        menu.exec(self.collections_tree.mapToGlobal(position))
+
+    def resync_book(self, book):
+        """Force re-sync a book to Kindle."""
+        message = (
+            f"Re-sync {book.title} to Kindle?\n\n"
+            "This will re-download, re-convert, and re-send the book."
+        )
+        reply = QMessageBox.question(
+            self,
+            "Re-Sync Book",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if reply == QMessageBox.StandardButton.No:
+            return
+
+        self.log_output(f"Starting re-sync of {book.title}...")
+        if self.sync_manager.force_resync_book(book):
+            self.log_output(f"Successfully re-synced {book.title}")
+            # Refresh the tree to update status
+            self._load_installed_books()
+            self.fetch_collections()
+        else:
+            self.log_output(f"Failed to re-sync {book.title}")
+            error_msg = f"Failed to re-sync {book.title}"
+            QMessageBox.warning(self, "Error", error_msg)
+
+    def delete_book(self, book):
+        """Mark a book for deletion from Kindle."""
+        message = (
+            f"Delete {book.title} from Kindle?\n\n"
+            "This action will remove the book from your Kindle."
+        )
+        reply = QMessageBox.question(
+            self,
+            "Delete Book",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if reply == QMessageBox.StandardButton.No:
+            return
+
+        self.log_output(f"Marking {book.title} for deletion...")
+        if self.sync_manager.mark_book_for_deletion(book.id, book.title):
+            # Delete marked books
+            self.sync_manager.delete_marked_books()
+            self.log_output(f"Successfully deleted {book.title}")
+            # Refresh the tree to update status
+            self._load_installed_books()
+            self.fetch_collections()
+        else:
+            self.log_output(f"Failed to delete {book.title}")
+            error_msg = f"Failed to delete {book.title}"
+            QMessageBox.warning(self, "Error", error_msg)
+
+    def _prompt_dependency_action(self, dependency: str, status: dict) -> bool:
+        """Prompt user when an optional conversion dependency is missing."""
+        if dependency == "kcc":
+            issues = status.get("issues") or []
+            issue_lines = "\n".join(f"- {item}" for item in issues)
+            if issue_lines:
+                issue_lines = f"\n\nDetected issues:\n{issue_lines}"
+
+            reply = QMessageBox.question(
+                self,
+                "Comic Conversion Requires KCC",
+                (
+                    "This comic requires Kindle Comic Converter (KCC).\n\n"
+                    "Would you like Hearth to download/setup KCC now?"
+                    f"{issue_lines}"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            return reply == QMessageBox.StandardButton.Yes
+
+        if dependency == "7z":
+            reply = QMessageBox.question(
+                self,
+                "7z Not Found",
+                (
+                    "7z was not detected. Some comic archives require it.\n\n"
+                    "Continue this conversion anyway? "
+                    "(Choose No to skip this book and continue with others.)"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            return reply == QMessageBox.StandardButton.Yes
+
+        return False

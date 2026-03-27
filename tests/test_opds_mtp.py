@@ -88,37 +88,34 @@ class TestKindleMTPDetection(unittest.TestCase):
 
     def test_mtp_detection_sets_transport(self):
         device = KindleDevice()
-
-        fake = Mock()
-        fake.stdout = "Vendor id: 0x1949\nAmazon Kindle"
-        fake.stderr = ""
-        fake.returncode = 0
+        backend = Mock()
+        backend.ensure_connected.return_value = True
 
         with patch.object(
             device,
             "_ensure_mtp_tools_available",
             return_value=True,
         ):
-            with patch.object(device, "_run_command", return_value=fake):
+            with patch.object(device, "_get_mtp_backend", return_value=backend):
                 self.assertTrue(device.is_connected())
 
         self.assertEqual(device.get_transport(), "mtp-libmtp")
 
     def test_ensure_hearth_folder_uses_newfolder(self):
         device = KindleDevice()
+        backend = Mock()
+        backend.ensure_folder_path.return_value = object()
 
         with patch.object(device, "_detect_mtp_kindle", return_value=True):
-            with patch.object(
-                device,
-                "_run_mtp_connect",
-                return_value=True,
-            ) as call:
+            with patch.object(device, "_get_mtp_backend", return_value=backend):
                 self.assertTrue(device.ensure_hearth_folder_exists())
 
-        self.assertEqual(call.call_args.args[0][0], "--newfolder")
+        backend.ensure_folder_path.assert_called()
 
     def test_copy_to_kindle_uses_sendfile(self):
         device = KindleDevice()
+        backend = Mock()
+        backend.send_file.return_value = True
 
         with tempfile.TemporaryDirectory(prefix="hearth_mtp_test_") as tmp:
             file_path = Path(tmp) / "book.mobi"
@@ -132,12 +129,56 @@ class TestKindleMTPDetection(unittest.TestCase):
                 ):
                     with patch.object(
                         device,
-                        "_run_mtp_connect",
-                        return_value=True,
-                    ) as call:
+                        "_get_mtp_backend",
+                        return_value=backend,
+                    ):
                         self.assertTrue(device.copy_to_kindle(file_path))
 
-            self.assertEqual(call.call_args.args[0][0], "--sendfile")
+            backend.send_file.assert_called()
+
+    def test_mtp_signature_without_backend_session_returns_false(self):
+        device = KindleDevice()
+        backend = Mock()
+        backend.ensure_connected.return_value = False
+
+        with patch.object(
+            device,
+            "_ensure_mtp_tools_available",
+            return_value=True,
+        ):
+            with patch.object(device, "_get_mtp_backend", return_value=backend):
+                with patch.object(
+                    device,
+                    "_read_usb_snapshot",
+                    return_value="Amazon Kindle VID=1949",
+                ):
+                    self.assertFalse(device._detect_mtp_kindle())
+
+        self.assertEqual(device.get_transport(), "none")
+
+    def test_is_connected_falls_back_to_usb_when_mtp_session_unavailable(self):
+        device = KindleDevice()
+        backend = Mock()
+        backend.ensure_connected.return_value = False
+
+        with patch.object(
+            device,
+            "_ensure_mtp_tools_available",
+            return_value=True,
+        ):
+            with patch.object(device, "_get_mtp_backend", return_value=backend):
+                with patch.object(
+                    device,
+                    "_read_usb_snapshot",
+                    return_value="Amazon Kindle VID=1949",
+                ):
+                    with patch.object(
+                        device,
+                        "_detect_usb_kindle",
+                        return_value=Path("/Volumes/Kindle"),
+                    ):
+                        self.assertTrue(device.is_connected())
+                        self.assertEqual(device.get_transport(), "usb")
 
 
 if __name__ == "__main__":

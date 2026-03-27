@@ -21,9 +21,10 @@ from ..sync.kindle_device import KindleDevice
 class KindleFilesPage(QWidget):
     """Read-only browser for files on the connected Kindle."""
 
-    def __init__(self):
+    def __init__(self, kindle_device: Optional[KindleDevice] = None):
         super().__init__()
         self.settings_manager = SettingsManager()
+        self._kindle_device: Optional[KindleDevice] = kindle_device
         self.tree: QTreeWidget
         self.path_label: QLabel
         self.status_label: QLabel
@@ -59,35 +60,43 @@ class KindleFilesPage(QWidget):
 
     def _build_kindle_device(self) -> KindleDevice:
         """Create a KindleDevice using saved settings."""
+        if self._kindle_device is not None:
+            return self._kindle_device
+
         settings = self.settings_manager.get_settings()
         if settings.kindle_mount_path:
             mount_path = Path(settings.kindle_mount_path)
         else:
             mount_path = None
-        return KindleDevice(
+        self._kindle_device = KindleDevice(
             mount_path=mount_path,
             auto_mount_mtp=settings.mtp_auto_mount,
             preferred_mtp_tool=settings.mtp_mount_tool,
             auto_install_mtp_backend=settings.mtp_auto_install_backend,
         )
+        return self._kindle_device
 
     def refresh_files(self) -> None:
         """Refresh file tree from the currently connected Kindle."""
         self.tree.clear()
 
         device = self._build_kindle_device()
-        mount = device.get_mount_path()
-        entries = device.list_file_tree()
-        if not entries:
+        if not device.is_connected():
             self.path_label.setText("Not connected")
-            self.status_label.setText("Could not read Kindle files")
+            self.status_label.setText("Kindle not connected")
             return
 
-        if mount:
-            self.path_label.setText(str(mount))
+        entries = device.list_file_tree()
+        transport = device.get_transport()
+        if transport == "usb":
+            mount = device.get_mount_path()
+            self.path_label.setText(str(mount) if mount else "usb")
         else:
-            transport = device.get_transport()
             self.path_label.setText(f"{transport} (API)")
+
+        if not entries:
+            self.status_label.setText("Connected, but no files were returned")
+            return
 
         self.status_label.setText("Loading file tree...")
 
@@ -99,7 +108,11 @@ class KindleFilesPage(QWidget):
     def _populate_entries(self, entries: list[dict]) -> None:
         """Populate tree from a list of entries with full paths."""
         nodes: dict[str, QTreeWidgetItem] = {}
-        for entry in sorted(entries, key=lambda e: str(e.get("full_path", ""))):
+        sorted_entries = sorted(
+            entries,
+            key=lambda e: str(e.get("full_path", "")),
+        )
+        for entry in sorted_entries:
             full_path = str(entry.get("full_path", ""))
             if not full_path or full_path == "/":
                 continue

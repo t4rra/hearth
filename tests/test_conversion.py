@@ -3,6 +3,8 @@
 import unittest
 import tempfile
 import shutil
+import sys
+import subprocess
 from pathlib import Path
 import zipfile
 
@@ -10,6 +12,7 @@ from hearth.converters.manager import ConverterManager
 from hearth.converters.base import ConversionFormat, ConversionResult
 from hearth.converters.kcc import KCCConverter
 from hearth.converters.calibre import CalibreConverter
+from unittest.mock import patch, Mock
 
 
 class MockConverter:
@@ -74,7 +77,7 @@ class TestComicConversion(unittest.TestCase):
         converter = KCCConverter(output_dir=self.output_dir)
 
         # Test supported formats
-        for ext in [".cbz", ".cbr", ".cb7", ".cbt"]:
+        for ext in [".cbz", ".cbr", ".cb7", ".cbt", ".cba"]:
             test_file = self.test_dir / f"test{ext}"
             test_file.touch()
             self.assertTrue(converter.can_convert(test_file))
@@ -92,6 +95,7 @@ class TestComicConversion(unittest.TestCase):
         self.assertIn(".cbz", formats)
         self.assertIn(".cbr", formats)
         self.assertIn(".cb7", formats)
+        self.assertIn(".cba", formats)
 
     def test_mock_comic_conversion(self):
         """Test mock comic conversion workflow."""
@@ -104,6 +108,58 @@ class TestComicConversion(unittest.TestCase):
         self.assertTrue(output_path.exists())
         self.assertEqual(output_path.suffix, ".mobi")
         self.assertTrue(output_path.read_text().startswith("Mock MOBI file"))
+
+    def test_kcc_command_falls_back_to_python_module(self):
+        """Test module fallback path when repo script is unavailable."""
+        version_result = subprocess.CompletedProcess(
+            args=["python", "-m", "comic2ebook", "--version"],
+            returncode=0,
+            stdout="Kindle Comic Converter 8.0",
+            stderr="",
+        )
+
+        with patch("hearth.converters.kcc.shutil.which", return_value=None):
+            with patch(
+                "hearth.converters.kcc.KCCConverter._ensure_repo_script",
+                return_value=None,
+            ):
+                with patch(
+                    "hearth.converters.kcc.subprocess.run",
+                    return_value=version_result,
+                ):
+                    converter = KCCConverter(output_dir=self.output_dir)
+                    converter.ensure_kcc_available(allow_bootstrap=False)
+
+        self.assertIsNotNone(converter.kcc_command)
+        assert converter.kcc_command is not None
+        self.assertEqual(converter.kcc_command[:2], [sys.executable, "-m"])
+
+    def test_kcc_convert_uses_valid_c2e_flags(self):
+        """Ensure kcc-c2e invocation uses flags compatible with upstream CLI."""
+        cbz_path = self.create_mock_cbz()
+        output_path = self.output_dir / f"{cbz_path.stem}.mobi"
+        output_path.write_text("mock mobi", encoding="utf-8")
+
+        converter = KCCConverter(output_dir=self.output_dir)
+        converter.kcc_command = [sys.executable, "/tmp/kcc-c2e.py"]
+
+        with patch("hearth.converters.kcc.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout="ok", stderr="")
+            result = converter.convert(
+                cbz_path,
+                output_format=ConversionFormat.MOBI,
+                manga_rtl=True,
+            )
+
+        self.assertTrue(result.success)
+        called_cmd = mock_run.call_args.kwargs.get("args")
+        if called_cmd is None:
+            called_cmd = mock_run.call_args.args[0]
+
+        self.assertIn("-q", called_cmd)
+        self.assertIn("-m", called_cmd)
+        self.assertNotIn("--manga", called_cmd)
+        self.assertNotIn("1.0", called_cmd)
 
 
 class TestEbookConversion(unittest.TestCase):

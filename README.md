@@ -119,7 +119,9 @@ Required packages:
 **macOS:**
 
 - Calibre (for ebook-convert): `brew install calibre`
-- KCC (for comic conversion): `pip install kcc-comic2ebook`
+- KCC (for comic conversion): installed via `requirements.txt`
+  - if missing at runtime, Hearth can attempt `pip install kcc-comic2ebook`
+  - disable runtime install attempt with `HEARTH_AUTO_INSTALL_KCC=0`
 - Optional MTP backend for modern Kindles:
   - `go-mtpx` (preferred when installed)
   - or `go-mtpfs`, `simple-mtpfs`, `jmtpfs`
