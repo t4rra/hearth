@@ -2,3 +2,6 @@ DEMO Files
 .venv
 */__pycache__
 *.pyc
+hearth/__pycache__
+hearth/converters/__pycache__
+tests/__pycache__
