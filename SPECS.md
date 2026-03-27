@@ -5,7 +5,8 @@ Sync your Kindle like an iPod, connecting to an OPDS server to sync your library
 ## Features
 
 - One-way sync from OPDS server to Kindle, with the server as the source of truth
-- Sync both individual books and whole collections to the Kindle,
+  - Sync both individual books and whole collections to the Kindle, by matching the metadata on the device with the OPDS server then showing what books are already on the device and which are missing, within the OPDS collections
+  - The user should do most of their browsing off the OPDS structure, with what's on the device shown as a badge or something similar, and then they can choose to sync individual books or whole collections to the device
 - Auto convert books to Kindle format (MOBI) if needed when syncing to the device
 - Keep a Hearth metadata file on the Kindle to reliably match books between the device and OPDS server
 - Macos support, but built with cross-platform compatibility in mind
