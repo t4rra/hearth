@@ -1,3 +1,0 @@
-/opt/homebrew/bin/mtp-connect
-/opt/homebrew/bin/mtp-detect
-/opt/homebrew/bin/mtp-filetree
