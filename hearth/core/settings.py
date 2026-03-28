@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -28,7 +28,13 @@ class Settings:
         if not path.exists():
             return cls()
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return cls(**payload)
+        allowed = {item.name for item in fields(cls)}
+        filtered = {
+            key: value
+            for key, value in payload.items()
+            if key in allowed
+        }
+        return cls(**filtered)
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

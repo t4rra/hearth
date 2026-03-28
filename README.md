@@ -36,7 +36,11 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-3. (Optional) Create a settings file at `.hearth/settings.json`.
+3. Start the GUI once to create and persist settings automatically at:
+
+```text
+~/.hearth/settings.json
+```
 
 Example:
 
@@ -89,17 +93,29 @@ hearth-gui
 GUI flow:
 
 - On startup, Hearth probes for a connected Kindle and displays status
+- On startup, Hearth attempts to reach OPDS and lazy-loads only the
+  first collection layer when available
 - Configure everything in the `Settings` tab, including OPDS auth
-- Use the `Library` tab to load OPDS items, select books, and sync
+- Use the `Library` tab to load OPDS collections, browse by branch,
+  select books, and sync
 - Use the `Kindle Files` tab to browse, download, and delete device files
 - Watch operation logs/status in the bottom panel
 
 GUI pages:
 
-- `Library`: browse OPDS acquisitions, see sync status, select and sync titles
+- `Library`: browse OPDS collections and associated titles,
+  see sync status, select and sync titles (collapsed by default;
+  sub-collections lazy-load when expanded)
 - `Kindle Files`: refresh, download, or delete files directly on device
 - `Settings`: OPDS URL/auth (`none`, `basic`, `bearer`), Kindle transport/mount,
-  converter commands, and workspace settings
+  converter commands, and workspace settings (auto-saved), with reset
+  buttons per group and a reset-all button
+
+Notes:
+
+- Kindle detection is automatic on startup and can be retried with
+  the `Probe Kindle` button.
+- EPUB output is not exposed in GUI settings for USB Kindle transfer.
 
 ## Run Tests
 

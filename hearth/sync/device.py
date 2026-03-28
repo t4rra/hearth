@@ -10,6 +10,27 @@ class KindleDevice:
     transport: str
     root: Path
 
+    @staticmethod
+    def _looks_like_kindle_root(path: Path) -> bool:
+        if not path.exists() or not path.is_dir():
+            return False
+
+        name = path.name.lower()
+        if "kindle" in name:
+            return True
+
+        documents = path / "documents"
+        if not documents.exists() or not documents.is_dir():
+            return False
+
+        # Common Kindle markers for USB-mounted roots.
+        markers = [
+            "system",
+            "audible",
+            "active-content-data",
+        ]
+        return any((path / marker).exists() for marker in markers)
+
     @classmethod
     def detect(
         cls,
@@ -18,7 +39,7 @@ class KindleDevice:
     ) -> "KindleDevice | None":
         if root_hint:
             candidate = Path(root_hint)
-            if candidate.exists():
+            if cls._looks_like_kindle_root(candidate):
                 transport = preferred if preferred != "auto" else "usb"
                 return cls(transport=transport, root=candidate)
             return None
@@ -27,10 +48,7 @@ class KindleDevice:
             volumes = Path("/Volumes")
             if volumes.exists():
                 for child in volumes.iterdir():
-                    if not child.is_dir():
-                        continue
-                    name = child.name.lower()
-                    if "kindle" in name:
+                    if cls._looks_like_kindle_root(child):
                         return cls(transport="usb", root=child)
 
         # MTP path is intentionally conservative. Actual MTP backend wiring

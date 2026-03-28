@@ -29,3 +29,20 @@ def test_merge_overrides_keeps_existing_values() -> None:
     merged = merge_overrides(base, {"auth_mode": "none", "opds_url": None})
     assert merged.opds_url == "https://a.example"
     assert merged.auth_mode == "none"
+
+
+def test_load_ignores_unknown_keys(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "opds_url": "https://example.test/opds",
+          "auto_load_library_on_startup": true,
+          "unknown_extra": "value"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = Settings.load(path)
+    assert loaded.opds_url == "https://example.test/opds"
