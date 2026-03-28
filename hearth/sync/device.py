@@ -11,11 +11,48 @@ class KindleDevice:
     root: Path
 
     @classmethod
+    def detect(
+        cls,
+        preferred: str = "auto",
+        root_hint: str = "",
+    ) -> "KindleDevice | None":
+        if root_hint:
+            candidate = Path(root_hint)
+            if candidate.exists():
+                transport = preferred if preferred != "auto" else "usb"
+                return cls(transport=transport, root=candidate)
+            return None
+
+        if preferred in {"auto", "usb"}:
+            volumes = Path("/Volumes")
+            if volumes.exists():
+                for child in volumes.iterdir():
+                    if not child.is_dir():
+                        continue
+                    name = child.name.lower()
+                    if "kindle" in name:
+                        return cls(transport="usb", root=child)
+
+        # MTP path is intentionally conservative. Actual MTP backend wiring
+        # should replace this placeholder transport root.
+        if preferred == "mtp":
+            return cls(
+                transport="mtp",
+                root=Path("/tmp/hearth-mtp-placeholder"),
+            )
+
+        return None
+
+    @classmethod
     def probe(
         cls,
         preferred: str = "auto",
         root_hint: str = "",
     ) -> "KindleDevice":
+        detected = cls.detect(preferred=preferred, root_hint=root_hint)
+        if detected is not None:
+            return detected
+
         if root_hint:
             transport = preferred if preferred != "auto" else "usb"
             return cls(transport=transport, root=Path(root_hint))

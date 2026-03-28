@@ -88,11 +88,18 @@ hearth-gui
 
 GUI flow:
 
-- Load settings (or edit fields directly)
-- Click "Load Library" to pull OPDS acquisitions
-- Select rows to sync
-- Click "Sync Selected"
-- Watch logs/status in the bottom panel
+- On startup, Hearth probes for a connected Kindle and displays status
+- Configure everything in the `Settings` tab, including OPDS auth
+- Use the `Library` tab to load OPDS items, select books, and sync
+- Use the `Kindle Files` tab to browse, download, and delete device files
+- Watch operation logs/status in the bottom panel
+
+GUI pages:
+
+- `Library`: browse OPDS acquisitions, see sync status, select and sync titles
+- `Kindle Files`: refresh, download, or delete files directly on device
+- `Settings`: OPDS URL/auth (`none`, `basic`, `bearer`), Kindle transport/mount,
+  converter commands, and workspace settings
 
 ## Run Tests
 
