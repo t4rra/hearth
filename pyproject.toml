@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hearth"
+version = "0.1.0"
+description = "OPDS-to-Kindle sync tool"
+readme = "OVERVIEW.md"
+requires-python = ">=3.11"
+authors = [
+  {name = "Hearth"}
+]
+dependencies = []
+
+[project.scripts]
+hearth = "hearth.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
