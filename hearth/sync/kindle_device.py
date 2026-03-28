@@ -918,10 +918,18 @@ class KindleDevice:
         except OSError:
             return False
 
-    def copy_to_kindle(self, file_path: Path) -> bool:
+    def copy_to_kindle(
+        self,
+        file_path: Path,
+        target_filename: Optional[str] = None,
+    ) -> bool:
         """Copy a file to the Kindle Hearth folder."""
         if not file_path.exists():
             return False
+
+        destination_name = (target_filename or file_path.name).strip()
+        if not destination_name:
+            destination_name = file_path.name
 
         if self._detect_mtp_kindle():
             backend = self._get_mtp_backend()
@@ -929,9 +937,27 @@ class KindleDevice:
                 return False
             if not self.ensure_hearth_folder_exists():
                 return False
+
+            upload_path = file_path
+            temp_copy: Optional[Path] = None
+            if destination_name != file_path.name:
+                try:
+                    temp_copy = Path(tempfile.mkdtemp(prefix="hearth_upload_")) / (
+                        destination_name
+                    )
+                    shutil.copy2(file_path, temp_copy)
+                    upload_path = temp_copy
+                except OSError:
+                    return False
+
             for remote_dir in self._mtp_hearth_candidates():
-                if backend.send_file(file_path, remote_dir):
+                if backend.send_file(upload_path, remote_dir):
+                    if temp_copy:
+                        shutil.rmtree(temp_copy.parent, ignore_errors=True)
                     return True
+
+            if temp_copy:
+                shutil.rmtree(temp_copy.parent, ignore_errors=True)
             return False
 
         hearth_dir = self.get_hearth_dir()
@@ -940,7 +966,7 @@ class KindleDevice:
 
         try:
             hearth_dir.mkdir(parents=True, exist_ok=True)
-            dest_path = hearth_dir / file_path.name
+            dest_path = hearth_dir / destination_name
             shutil.copy2(file_path, dest_path)
             return True
         except OSError:
@@ -971,6 +997,74 @@ class KindleDevice:
 
         try:
             file_path.unlink()
+            return True
+        except OSError:
+            return False
+
+    def download_file_from_kindle(
+        self,
+        remote_path: str,
+        local_file: Path,
+    ) -> bool:
+        """Download a single remote Kindle file to local path."""
+        target = "/" + remote_path.strip().strip("/").replace("\\", "/")
+
+        if self._detect_mtp_kindle():
+            backend = self._get_mtp_backend()
+            if not backend:
+                return False
+
+            try:
+                local_file.parent.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                return False
+
+            return backend.get_file(target, local_file)
+
+        mount = self.get_mount_path()
+        if not mount:
+            return False
+
+        source = mount / target.lstrip("/")
+        if not source.exists() or not source.is_file():
+            return False
+
+        try:
+            local_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, local_file)
+            return True
+        except OSError:
+            return False
+
+    def delete_path_from_kindle(self, remote_path: str, is_dir: bool) -> bool:
+        """Delete a remote file or folder from Kindle storage."""
+        target = "/" + remote_path.strip().strip("/").replace("\\", "/")
+
+        if self._detect_mtp_kindle():
+            backend = self._get_mtp_backend()
+            if not backend:
+                return False
+
+            if is_dir:
+                return backend.remove_folder(target)
+
+            if backend.delete_file_by_path(target):
+                return True
+            return self._mtp_cli_delete(target)
+
+        mount = self.get_mount_path()
+        if not mount:
+            return False
+
+        source = mount / target.lstrip("/")
+        if not source.exists():
+            return False
+
+        try:
+            if is_dir:
+                shutil.rmtree(source)
+            else:
+                source.unlink()
             return True
         except OSError:
             return False

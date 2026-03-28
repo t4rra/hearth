@@ -108,6 +108,29 @@ class TestKindleWritePaths(unittest.TestCase):
         self.assertTrue(copied.exists())
         self.assertEqual(copied.read_bytes(), self.source_file.read_bytes())
 
+    def test_copy_to_kindle_usb_uses_target_filename_override(self):
+        hearth_dir = self.test_dir / "kindle" / "documents" / "Hearth"
+
+        with patch.object(
+            self.device,
+            "_detect_mtp_kindle",
+            return_value=False,
+        ):
+            with patch.object(
+                self.device,
+                "get_hearth_dir",
+                return_value=hearth_dir,
+            ):
+                copied = self.device.copy_to_kindle(
+                    self.source_file,
+                    target_filename="Readable Book - Author.mobi",
+                )
+                self.assertTrue(copied)
+
+        copied_file = hearth_dir / "Readable Book - Author.mobi"
+        self.assertTrue(copied_file.exists())
+        self.assertEqual(copied_file.read_bytes(), self.source_file.read_bytes())
+
     def test_copy_to_kindle_usb_returns_false_on_copy_error(self):
         hearth_dir = self.test_dir / "kindle" / "documents" / "Hearth"
 

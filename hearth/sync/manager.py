@@ -1,6 +1,10 @@
 """Sync manager for coordinating OPDS to Kindle synchronization."""
 
 import io
+import re
+import shutil
+import subprocess
+import platform
 import zipfile
 from pathlib import Path
 from typing import Optional, Callable, List
@@ -347,9 +351,23 @@ class SyncManager:
             dependency_prompt_callback=dependency_prompt_callback,
         )
         if not prepared_path:
+            if not force_resync and self._is_book_already_synced_on_device(book):
+                return True
             return False
 
         return self.push_prepared_book_to_kindle(book, prepared_path)
+
+    def _is_book_already_synced_on_device(self, book: Book) -> bool:
+        """Return True when metadata indicates the book is already present on device."""
+        if not self.kindle:
+            return False
+
+        metadata = self.kindle.load_metadata()
+        if book.id not in metadata:
+            return False
+
+        book_meta = metadata[book.id]
+        return bool(book_meta.on_device and book_meta.sync_status == "on_device")
 
     def prepare_book_for_sync(
         self,
@@ -450,6 +468,7 @@ class SyncManager:
                     "description": book.description or "",
                     "format": book.format or "",
                 },
+                conversion_settings=self.settings.conversion_settings,
             )
 
             if not result.success:
@@ -464,8 +483,72 @@ class SyncManager:
         else:
             converted_path = downloaded_path
 
+        self._apply_book_metadata_overrides(converted_path, book)
+
         self._log(f"Prepared {book.title} for sync: {converted_path}")
         return converted_path
+
+    def _find_ebook_meta_command(self) -> Optional[str]:
+        """Locate calibre's ebook-meta utility when available."""
+        found = shutil.which("ebook-meta")
+        if found:
+            return found
+
+        system = platform.system()
+        if system == "Darwin":
+            candidates = [
+                "/Applications/calibre.app/Contents/MacOS/ebook-meta",
+                "/opt/homebrew/bin/ebook-meta",
+                "/usr/local/bin/ebook-meta",
+            ]
+        elif system == "Windows":
+            candidates = [
+                r"C:\Program Files\Calibre2\ebook-meta.exe",
+                r"C:\Program Files (x86)\Calibre2\ebook-meta.exe",
+            ]
+        else:
+            candidates = ["/opt/calibre/ebook-meta", "/usr/bin/ebook-meta"]
+
+        for candidate in candidates:
+            if Path(candidate).exists():
+                return candidate
+
+        return None
+
+    def _apply_book_metadata_overrides(self, file_path: Path, book: Book) -> None:
+        """Apply title/author metadata to converted books for Kindle display."""
+        if file_path.suffix.lower() not in {".mobi", ".azw3", ".epub"}:
+            return
+
+        title = (book.title or "").strip()
+        author = (book.author or "").strip()
+        if not title:
+            return
+
+        ebook_meta = self._find_ebook_meta_command()
+        if not ebook_meta:
+            return
+
+        cmd = [ebook_meta, str(file_path), "--title", title]
+        if author:
+            cmd.extend(["--authors", author])
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+            return
+
+        if result.returncode != 0:
+            self._log(
+                "Warning: ebook-meta failed for "
+                f"{file_path.name}; Kindle may show source metadata title"
+            )
 
     def push_prepared_book_to_kindle(self, book: Book, file_path: Path) -> bool:
         """Copy a locally prepared file to Kindle and persist metadata."""
@@ -481,23 +564,76 @@ class SyncManager:
             self._log("Error: Could not create Hearth folder on Kindle")
             return False
 
+        kindle_filename = self._build_kindle_filename(book, file_path)
+
         # Copy to Kindle
-        if not self.kindle.copy_to_kindle(file_path):
+        if not self.kindle.copy_to_kindle(
+            file_path,
+            target_filename=kindle_filename,
+        ):
             self._log(f"Error copying {book.title} to Kindle")
             return False
 
         # Update metadata
-        self._update_sync_metadata(book, file_path)
+        self._update_sync_metadata(
+            book,
+            file_path,
+            kindle_filename=kindle_filename,
+        )
 
         self._log(f"Successfully synced {book.title} to Kindle")
         return True
 
-    def _update_sync_metadata(self, book: Book, file_path: Path) -> None:
+    def _sanitize_filename_segment(self, value: str) -> str:
+        """Normalize one filename segment for Kindle and local filesystems."""
+        cleaned = re.sub(r"[\\/:*?\"<>|]+", " ", value or "")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        cleaned = cleaned.strip(". ")
+        return cleaned
+
+    def _build_kindle_filename(self, book: Book, file_path: Path) -> str:
+        """Build a readable Kindle filename from metadata with safe fallbacks."""
+        title = self._sanitize_filename_segment(book.title or "") or "Unknown Title"
+        author = self._sanitize_filename_segment(book.author or "") or "Unknown Author"
+
+        series_name = self._sanitize_filename_segment(
+            str(getattr(book, "series_name", "") or "")
+        )
+        series_index = self._sanitize_filename_segment(
+            str(getattr(book, "series_index", "") or "")
+        )
+
+        parts = []
+        if series_name:
+            parts.append(series_name)
+            if series_index:
+                parts.append(f"#{series_index}")
+
+        parts.extend([title, author])
+        base_name = " - ".join(part for part in parts if part)
+
+        ext = file_path.suffix or ".mobi"
+        max_base_length = 140 - len(ext)
+        if len(base_name) > max_base_length:
+            base_name = base_name[:max_base_length].rstrip(" .-")
+
+        if not base_name:
+            base_name = "book"
+
+        return f"{base_name}{ext}"
+
+    def _update_sync_metadata(
+        self,
+        book: Book,
+        file_path: Path,
+        kindle_filename: Optional[str] = None,
+    ) -> None:
         """Update metadata file with synced book info."""
         if not self.kindle:
             return
 
         metadata = self.kindle.load_metadata()
+        stored_filename = kindle_filename or file_path.name
 
         metadata[book.id] = KindleMetadata(
             title=book.title,
@@ -508,7 +644,7 @@ class SyncManager:
             ),
             kindle_format="mobi",
             sync_date=datetime.now().isoformat(),
-            local_path=str(file_path),
+            local_path=f"Documents/Hearth/{stored_filename}",
             desired_sync=True,
             on_device=True,
             sync_status="on_device",

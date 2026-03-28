@@ -18,6 +18,8 @@ class Book:
     cover_url: Optional[str] = None
     description: Optional[str] = None
     format: Optional[str] = None
+    series_name: Optional[str] = None
+    series_index: Optional[str] = None
 
 
 @dataclass
@@ -119,6 +121,96 @@ class OPDSClient:
 
         return ""
 
+    def _looks_like_identifier(self, value: str) -> bool:
+        """Return True when value appears to be an internal identifier."""
+        normalized = (value or "").strip().lower()
+        if not normalized:
+            return True
+
+        return normalized.startswith("urn:")
+
+    def _entry_title(self, entry) -> str:
+        """Extract a human-readable title from OPDS entry metadata."""
+        title_candidates = [
+            entry.get("title"),
+            entry.get("dc_title"),
+            entry.get("dcterms_title"),
+        ]
+
+        title_detail = entry.get("title_detail")
+        if isinstance(title_detail, dict):
+            title_candidates.append(title_detail.get("value"))
+
+        for link in entry.get("links", []):
+            title_candidates.append(link.get("title"))
+
+        for candidate in title_candidates:
+            if not candidate:
+                continue
+
+            text = str(candidate).strip()
+            if not text:
+                continue
+            if self._looks_like_identifier(text):
+                continue
+            return text
+
+        fallback = str(entry.get("id", "") or "").strip()
+        return fallback or "Unknown"
+
+    def _entry_series_name(self, entry) -> Optional[str]:
+        """Extract optional series name from common OPDS/calibre fields."""
+        candidates = [
+            entry.get("series"),
+            entry.get("calibre_series"),
+            entry.get("belongs_to_collection"),
+        ]
+
+        for link in entry.get("links", []):
+            rel = (link.get("rel") or "").lower()
+            if "collection" in rel:
+                candidates.append(link.get("title"))
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+
+            if isinstance(candidate, dict):
+                candidate = candidate.get("title") or candidate.get("name")
+
+            text = str(candidate).strip()
+            if not text:
+                continue
+            if self._looks_like_identifier(text):
+                continue
+            return text
+
+        return None
+
+    def _entry_series_index(self, entry) -> Optional[str]:
+        """Extract optional series index from common OPDS/calibre fields."""
+        candidates = [
+            entry.get("series_index"),
+            entry.get("calibre_series_index"),
+            entry.get("group_position"),
+        ]
+
+        for link in entry.get("links", []):
+            rel = (link.get("rel") or "").lower()
+            if "collection" in rel:
+                candidates.append(link.get("number"))
+
+        for candidate in candidates:
+            if candidate is None:
+                continue
+
+            text = str(candidate).strip()
+            if not text:
+                continue
+            return text
+
+        return None
+
     def get_books_from_feed(
         self,
         feed: feedparser.FeedParserDict,
@@ -135,10 +227,12 @@ class OPDSClient:
                 continue
 
             book = Book(
-                title=entry.get("title", "Unknown"),
+                title=self._entry_title(entry),
                 author=entry.get("author", "Unknown"),
                 id=entry.get("id", ""),
                 description=self._entry_description(entry),
+                series_name=self._entry_series_name(entry),
+                series_index=self._entry_series_index(entry),
             )
 
             # Extract download link

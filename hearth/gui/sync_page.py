@@ -5,6 +5,7 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication,
     QWidget,
+    QFrame,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
@@ -14,10 +15,22 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QTreeWidget,
     QTreeWidgetItem,
+    QListWidget,
+    QListWidgetItem,
+    QStackedWidget,
     QMenu,
+    QProgressBar,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QTextCursor, QColor, QBrush
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRect, QEvent
+from PyQt6.QtGui import (
+    QTextCursor,
+    QColor,
+    QBrush,
+    QPixmap,
+    QPainter,
+    QIcon,
+    QPalette,
+)
 
 from ..sync.manager import SyncManager
 from ..core.config import SettingsManager
@@ -94,6 +107,134 @@ class SyncWorker(QThread):
             self.finished.emit(False, f"Error: {str(error)}")
 
 
+class _LoadingOverlay(QWidget):
+    """Single-window blocking overlay used for loading and sync progress."""
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setVisible(False)
+
+        card = QFrame(self)
+        card.setObjectName("overlayCard")
+
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 16, 16, 16)
+        card_layout.setSpacing(10)
+
+        self.title_label = QLabel("Please Wait")
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_font = self.title_label.font()
+        title_font.setBold(True)
+        self.title_label.setFont(title_font)
+        card_layout.addWidget(self.title_label)
+
+        self.message_label = QLabel("")
+        self.message_label.setWordWrap(True)
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(self.message_label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(True)
+        card_layout.addWidget(self.progress_bar)
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(24, 24, 24, 24)
+        outer_layout.addStretch()
+
+        center_row = QHBoxLayout()
+        center_row.addStretch()
+        center_row.addWidget(card)
+        center_row.addStretch()
+
+        outer_layout.addLayout(center_row)
+        outer_layout.addStretch()
+
+        self._card = card
+        self._applying_palette_theme = False
+        self._overlay_style = ""
+        self._card_style = ""
+        self._text_style = ""
+        self._apply_palette_theme()
+
+    def _apply_palette_theme(self) -> None:
+        """Adapt overlay/card colors to active app palette."""
+        if self._applying_palette_theme:
+            return
+
+        self._applying_palette_theme = True
+        palette = self.palette()
+        try:
+            window_color = palette.window().color()
+            text_color = palette.windowText().color()
+            base_color = palette.base().color()
+            border_color = palette.mid().color()
+
+            alpha = 150 if window_color.lightness() < 128 else 96
+            overlay_style = f"background-color: rgba(0, 0, 0, {alpha});"
+            if overlay_style != self._overlay_style:
+                self.setStyleSheet(overlay_style)
+                self._overlay_style = overlay_style
+
+            card_style = (
+                "QFrame#overlayCard {"
+                f"background: {base_color.name()};"
+                f"border: 1px solid {border_color.name()};"
+                "border-radius: 10px;"
+                "}"
+            )
+            if card_style != self._card_style:
+                self._card.setStyleSheet(card_style)
+                self._card_style = card_style
+
+            text_style = f"color: {text_color.name()};"
+            if text_style != self._text_style:
+                self.title_label.setStyleSheet(text_style)
+                self.message_label.setStyleSheet(text_style)
+                self._text_style = text_style
+        finally:
+            self._applying_palette_theme = False
+
+    def changeEvent(self, event) -> None:
+        """Refresh colors when system/app palette changes."""
+        event_type = event.type()
+        if event_type in (
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+        ):
+            if not self._applying_palette_theme:
+                self._apply_palette_theme()
+        super().changeEvent(event)
+
+    def show_spinner(self, title: str, message: str) -> None:
+        """Show indeterminate busy state."""
+        self.title_label.setText(title)
+        self.message_label.setText(message)
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setValue(0)
+        self.show()
+        self.raise_()
+
+    def show_progress(
+        self,
+        title: str,
+        message: str,
+        minimum: int,
+        maximum: int,
+    ) -> None:
+        """Show determinate progress state."""
+        self.title_label.setText(title)
+        self.message_label.setText(message)
+        self.progress_bar.setRange(minimum, maximum)
+        self.progress_bar.setValue(minimum)
+        self.show()
+        self.raise_()
+
+    def update_progress(self, value: int, message: str) -> None:
+        """Update determinate progress state."""
+        self.message_label.setText(message)
+        self.progress_bar.setValue(value)
+
+
 class SyncPage(QWidget):
     """Sync management page."""
 
@@ -113,9 +254,72 @@ class SyncPage(QWidget):
         self._tree_nodes_by_path = {}
         self._library_root_item = None
         self._startup_status_logged = False
+        self._loading_overlay = None
+        self._startup_pending_steps = set()
+        self._sync_total_steps = 0
+        self._use_grid_view = False
+        self._cover_icon_cache = {}
         self.init_ui()
+        self._loading_overlay = _LoadingOverlay(self)
+        self._loading_overlay.setGeometry(self.rect())
+        self._begin_startup_loading()
         self.check_connection()
         self.fetch_collections()
+
+    def _begin_startup_loading(self) -> None:
+        """Show blocking spinner while initial startup checks complete."""
+        self._startup_pending_steps = {"connection", "collections"}
+        self._show_blocking_dialog("Loading library and checking Kindle...")
+
+    def _mark_startup_step_done(self, step: str) -> None:
+        """Track startup async completion and close blocker when done."""
+        if step in self._startup_pending_steps:
+            self._startup_pending_steps.remove(step)
+        if not self._startup_pending_steps:
+            self._hide_blocking_dialog()
+
+    def _show_blocking_dialog(self, label: str) -> None:
+        """Show in-page blocking overlay with an indeterminate spinner."""
+        if self._loading_overlay is None:
+            return
+        self._loading_overlay.show_spinner("Please Wait", label)
+
+    def _hide_blocking_dialog(self) -> None:
+        """Hide active loading overlay."""
+        if self._loading_overlay is not None:
+            self._loading_overlay.hide()
+
+    def _start_sync_progress(self, total_books: int) -> None:
+        """Start determinate in-page progress overlay for sync operations."""
+        self._sync_total_steps = max(1, total_books * 2)
+        if self._loading_overlay is None:
+            return
+        self._loading_overlay.show_progress(
+            "Syncing Library",
+            f"Preparing books 0/{total_books}...",
+            0,
+            self._sync_total_steps,
+        )
+
+    def _update_sync_progress(self, value: int, label: str) -> None:
+        """Update sync progress value and label if overlay is active."""
+        if self._loading_overlay is None:
+            return
+        self._loading_overlay.update_progress(
+            min(value, self._sync_total_steps),
+            label,
+        )
+
+    def _finish_sync_progress(self) -> None:
+        """Close sync progress overlay."""
+        self._sync_total_steps = 0
+        self._hide_blocking_dialog()
+
+    def resizeEvent(self, event) -> None:
+        """Keep overlay stretched to page bounds on resize."""
+        super().resizeEvent(event)
+        if self._loading_overlay is not None:
+            self._loading_overlay.setGeometry(self.rect())
 
     def _start_worker(self, operation: str, collection=None) -> SyncWorker:
         """Create and start a tracked worker thread."""
@@ -167,7 +371,19 @@ class SyncPage(QWidget):
         layout.addLayout(status_layout)
 
         # Books/Collections display
-        layout.addWidget(QLabel("Library:"))
+        library_header_layout = QHBoxLayout()
+        library_header_layout.addWidget(QLabel("Library:"))
+        library_header_layout.addStretch()
+
+        self.list_view_btn = QPushButton("List")
+        self.list_view_btn.clicked.connect(lambda: self._set_library_view(False))
+        library_header_layout.addWidget(self.list_view_btn)
+
+        self.grid_view_btn = QPushButton("Grid")
+        self.grid_view_btn.clicked.connect(lambda: self._set_library_view(True))
+        library_header_layout.addWidget(self.grid_view_btn)
+
+        layout.addLayout(library_header_layout)
 
         # Collections tree (for Collections view)
         self.collections_tree = QTreeWidget()
@@ -184,7 +400,21 @@ class SyncPage(QWidget):
         self.collections_tree.customContextMenuRequested.connect(
             self.on_tree_context_menu
         )
-        layout.addWidget(self.collections_tree)
+
+        self.grid_view = QListWidget()
+        self.grid_view.setViewMode(QListWidget.ViewMode.IconMode)
+        self.grid_view.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.grid_view.setMovement(QListWidget.Movement.Static)
+        self.grid_view.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.grid_view.setIconSize(QSize(120, 170))
+        self.grid_view.setGridSize(QSize(170, 250))
+        self.grid_view.setSpacing(10)
+
+        self.library_view_stack = QStackedWidget()
+        self.library_view_stack.addWidget(self.collections_tree)
+        self.library_view_stack.addWidget(self.grid_view)
+        layout.addWidget(self.library_view_stack)
+        self._set_library_view(False)
 
         # Buttons
         button_layout = QHBoxLayout()
@@ -207,6 +437,137 @@ class SyncPage(QWidget):
 
         self.sync_manager.set_progress_callback(self.log_output)
 
+    def _set_library_view(self, grid: bool) -> None:
+        """Switch between list and cover grid views."""
+        self._use_grid_view = grid
+        if grid:
+            self.library_view_stack.setCurrentWidget(self.grid_view)
+            self.grid_view_btn.setEnabled(False)
+            self.list_view_btn.setEnabled(True)
+        else:
+            self.library_view_stack.setCurrentWidget(self.collections_tree)
+            self.grid_view_btn.setEnabled(True)
+            self.list_view_btn.setEnabled(False)
+
+    def _build_cover_icon(self, title: str, author: str) -> QIcon:
+        """Create a lightweight pseudo-cover icon for grid tiles."""
+        pixmap = QPixmap(120, 170)
+        pixmap.fill(QColor(242, 242, 242))
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        accent = QColor(86, 113, 204)
+        painter.fillRect(QRect(0, 0, 120, 170), QColor(230, 235, 248))
+        painter.fillRect(QRect(0, 0, 120, 32), accent)
+
+        initial = "?"
+        for char in title or "":
+            if char.strip():
+                initial = char.upper()
+                break
+
+        painter.setPen(QColor("white"))
+        title_font = painter.font()
+        title_font.setBold(True)
+        title_font.setPointSize(14)
+        painter.setFont(title_font)
+        painter.drawText(
+            QRect(0, 0, 120, 32),
+            Qt.AlignmentFlag.AlignCenter,
+            initial,
+        )
+
+        painter.setPen(QColor(45, 45, 45))
+        meta_font = painter.font()
+        meta_font.setPointSize(8)
+        painter.setFont(meta_font)
+
+        title_text = (title or "Unknown").strip()
+        if len(title_text) > 34:
+            title_text = title_text[:31] + "..."
+        author_text = (author or "Unknown").strip()
+        if len(author_text) > 34:
+            author_text = author_text[:31] + "..."
+
+        painter.drawText(
+            QRect(8, 44, 104, 68),
+            Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
+            title_text,
+        )
+        painter.setPen(QColor(90, 90, 90))
+        painter.drawText(
+            QRect(8, 118, 104, 44),
+            Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
+            author_text,
+        )
+
+        painter.end()
+        return QIcon(pixmap)
+
+    def _cover_icon_from_book(self, book) -> QIcon:
+        """Return cached OPDS cover icon when available, else generated icon."""
+        cache_key = book.id or book.title
+        if cache_key in self._cover_icon_cache:
+            return self._cover_icon_cache[cache_key]
+
+        icon = None
+        if book.cover_url and self.sync_manager.opds_client:
+            content = self.sync_manager.opds_client.download_content(
+                book.cover_url,
+                timeout=6,
+            )
+            if content:
+                pixmap = QPixmap()
+                if pixmap.loadFromData(content):
+                    scaled = pixmap.scaled(
+                        120,
+                        170,
+                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    icon = QIcon(scaled)
+
+        if icon is None:
+            icon = self._build_cover_icon(book.title, book.author)
+
+        self._cover_icon_cache[cache_key] = icon
+        return icon
+
+    def _refresh_grid_view(self) -> None:
+        """Render flat book grid with cover tiles."""
+        self.grid_view.clear()
+
+        books = sorted(
+            self.books_by_id.values(),
+            key=lambda book: (book.title or "").lower(),
+        )
+
+        for book in books:
+            is_installed = book.id in self.installed_book_ids
+            is_desired = book.id in self.desired_book_ids
+
+            status = ""
+            if is_desired and is_installed:
+                status = "Wanted · On Device"
+            elif is_desired and not is_installed:
+                status = "Wanted · Not Synced"
+            elif is_installed:
+                status = "On Device"
+
+            text = book.title
+            if status:
+                text = f"{book.title}\n{status}"
+
+            icon = self._cover_icon_from_book(book)
+            item = QListWidgetItem(icon, text)
+            item.setData(Qt.ItemDataRole.UserRole, book.id)
+            item.setToolTip(f"{book.title}\n{book.author}")
+            self.grid_view.addItem(item)
+
+            if is_desired:
+                item.setSelected(True)
+
     def check_connection(self):
         """Check connection status."""
         self.log_output("Checking connection status...")
@@ -222,6 +583,7 @@ class SyncPage(QWidget):
         """Handle connection check result."""
         self.status_label.setText(message)
         self.log_output(f"Connection check: {message}")
+        self._mark_startup_step_done("connection")
 
     def _log_startup_status(self, status: dict) -> None:
         """Render startup dependency diagnostics in the sync log."""
@@ -262,6 +624,7 @@ class SyncPage(QWidget):
         if not self.sync_manager.is_opds_configured():
             msg = "OPDS server not configured. " "Please configure in Settings."
             QMessageBox.warning(self, "Error", msg)
+            self._mark_startup_step_done("collections")
             return
 
         self.log_output("Fetching collections from OPDS server...")
@@ -272,10 +635,13 @@ class SyncPage(QWidget):
     def on_collections_fetched(self, _success: bool, message: str):
         """Handle collections fetch completion."""
         self.log_output(message)
+        self._mark_startup_step_done("collections")
 
     def display_collections(self, collections: list) -> None:
         """Display collections with status badges."""
         self.collections_tree.clear()
+        self.grid_view.clear()
+        self._cover_icon_cache.clear()
         self._tree_nodes_by_path = {}
         self.collections = collections
         self.books_by_id = {}
@@ -383,6 +749,7 @@ class SyncPage(QWidget):
 
         self.collections_tree.collapseAll()
         self._library_root_item.setExpanded(True)
+        self._refresh_grid_view()
 
     def _has_book_child(
         self,
@@ -533,64 +900,96 @@ class SyncPage(QWidget):
                 QMessageBox.warning(self, "Error", msg)
                 return
 
-        books_to_sync = self._get_checked_books_from_tree()
+        if self._use_grid_view:
+            books_to_sync = self._get_selected_books_from_grid()
+            empty_selection_msg = "Please select at least one book to sync."
+        else:
+            books_to_sync = self._get_checked_books_from_tree()
+            empty_selection_msg = (
+                "Please check at least one collection or book to sync."
+            )
+
         if not books_to_sync:
-            msg = "Please check at least one collection or book to sync."
-            QMessageBox.warning(self, "Error", msg)
+            QMessageBox.warning(self, "Error", empty_selection_msg)
             return
 
         self.sync_manager.mark_books_desired_for_sync(books_to_sync)
 
         self.log_output(f"Starting sync of {len(books_to_sync)} book(s)...")
+        total_books = len(books_to_sync)
+        total_steps = max(1, total_books * 2)
+        completed_steps = 0
+        prepared_count = 0
+        pushed_count = 0
+        self._start_sync_progress(total_books)
 
-        prepared_books = []
-        skipped_titles = []
-        for book in books_to_sync:
-            prepared = self.sync_manager.prepare_book_for_sync(
-                book,
-                dependency_prompt_callback=self._prompt_dependency_action,
+        try:
+            prepared_books = []
+            skipped_titles = []
+            for book in books_to_sync:
+                prepared = self.sync_manager.prepare_book_for_sync(
+                    book,
+                    dependency_prompt_callback=self._prompt_dependency_action,
+                )
+                completed_steps += 1
+                if prepared is not None:
+                    prepared_books.append((book, prepared))
+                    prepared_count += 1
+                else:
+                    skipped_titles.append(book.title)
+
+                self._update_sync_progress(
+                    min(completed_steps, total_steps),
+                    f"Preparing books {prepared_count}/{total_books}...",
+                )
+
+            if not prepared_books:
+                self.log_output("No books were prepared for push")
+                self._show_sync_summary(
+                    requested=len(books_to_sync),
+                    synced=0,
+                    failed=0,
+                    skipped=len(skipped_titles),
+                    failed_titles=[],
+                    skipped_titles=skipped_titles,
+                )
+                return
+
+            self.log_output(
+                f"Pushing {len(prepared_books)} prepared book(s) to Kindle..."
             )
-            if prepared is not None:
-                prepared_books.append((book, prepared))
-            else:
-                skipped_titles.append(book.title)
 
-        if not prepared_books:
-            self.log_output("No books were prepared for push")
+            synced_titles = []
+            failed_titles = []
+            for book, local_path in prepared_books:
+                if self.sync_manager.push_prepared_book_to_kindle(
+                    book,
+                    local_path,
+                ):
+                    synced_titles.append(book.title)
+                else:
+                    failed_titles.append(book.title)
+
+                pushed_count += 1
+                completed_steps += 1
+                self._update_sync_progress(
+                    min(completed_steps, total_steps),
+                    f"Syncing books {pushed_count}/{len(prepared_books)}...",
+                )
+
+            self._load_installed_books()
+            self.fetch_collections()
+
             self._show_sync_summary(
                 requested=len(books_to_sync),
-                synced=0,
-                failed=0,
+                synced=len(synced_titles),
+                failed=len(failed_titles),
                 skipped=len(skipped_titles),
-                failed_titles=[],
+                failed_titles=failed_titles,
                 skipped_titles=skipped_titles,
             )
-            return
-
-        self.log_output(f"Pushing {len(prepared_books)} prepared book(s) to Kindle...")
-
-        synced_titles = []
-        failed_titles = []
-        for book, local_path in prepared_books:
-            if self.sync_manager.push_prepared_book_to_kindle(
-                book,
-                local_path,
-            ):
-                synced_titles.append(book.title)
-            else:
-                failed_titles.append(book.title)
-
-        self._load_installed_books()
-        self.fetch_collections()
-
-        self._show_sync_summary(
-            requested=len(books_to_sync),
-            synced=len(synced_titles),
-            failed=len(failed_titles),
-            skipped=len(skipped_titles),
-            failed_titles=failed_titles,
-            skipped_titles=skipped_titles,
-        )
+        finally:
+            self._finish_sync_progress()
 
     def _show_sync_summary(
         self,
@@ -694,6 +1093,25 @@ class SyncPage(QWidget):
             checked_books.append(book)
 
         return checked_books
+
+    def _get_selected_books_from_grid(self):
+        """Collect selected books from cover grid view."""
+        selected_books = []
+        seen_ids = set()
+
+        for item in self.grid_view.selectedItems():
+            book_id = item.data(Qt.ItemDataRole.UserRole)
+            if not book_id or book_id in seen_ids:
+                continue
+
+            book = self.books_by_id.get(book_id)
+            if not book:
+                continue
+
+            seen_ids.add(book_id)
+            selected_books.append(book)
+
+        return selected_books
 
     def log_output(self, message: str):
         """Add message to output log."""

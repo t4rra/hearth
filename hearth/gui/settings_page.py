@@ -158,6 +158,29 @@ class SettingsPage(QWidget):
         quality_layout.addWidget(self.comic_quality)
         conversion_layout.addLayout(quality_layout)
 
+        device_layout = QHBoxLayout()
+        device_layout.addWidget(QLabel("Comic Device Profile:"))
+        self.comic_device_profile = QComboBox()
+        self.comic_device_profile.addItem("Kindle Standard (KS)", "KS")
+        self.comic_device_profile.addItem("Kindle Paperwhite (KPW)", "KPW")
+        self.comic_device_profile.addItem("Kindle Voyage (KV)", "KV")
+        self.comic_device_profile.addItem("Kindle Oasis (KOA)", "KOA")
+        self.comic_device_profile.addItem("Kindle Scribe (KS)", "KS")
+        device_layout.addWidget(self.comic_device_profile)
+        conversion_layout.addLayout(device_layout)
+
+        direction_layout = QHBoxLayout()
+        direction_layout.addWidget(QLabel("Reading Direction:"))
+        self.manga_mode = QComboBox()
+        self.manga_mode.addItem("Auto", "auto")
+        self.manga_mode.addItem("Left-to-Right", "ltr")
+        self.manga_mode.addItem("Right-to-Left", "rtl")
+        direction_layout.addWidget(self.manga_mode)
+        conversion_layout.addLayout(direction_layout)
+
+        self.manga_auto_detect = QCheckBox("Auto-detect manga from metadata")
+        conversion_layout.addWidget(self.manga_auto_detect)
+
         conversion_group.setLayout(conversion_layout)
         layout.addWidget(conversion_group)
 
@@ -191,9 +214,22 @@ class SettingsPage(QWidget):
         self._update_auth_visibility(self.opds_auth_type.currentText())
 
         quality_map = {"high": 0, "medium": 1, "low": 2}
-        self.comic_quality.setCurrentIndex(
-            quality_map.get(settings.conversion_settings.comic_quality, 0)
-        )
+        conversion_settings = settings.conversion_settings
+        comic_quality = getattr(conversion_settings, "comic_quality", "high")
+        self.comic_quality.setCurrentIndex(quality_map.get(comic_quality, 0))
+
+        profile = getattr(conversion_settings, "comic_device_profile", "KS")
+        profile_index = self.comic_device_profile.findData(profile)
+        if profile_index >= 0:
+            self.comic_device_profile.setCurrentIndex(profile_index)
+
+        mode = getattr(conversion_settings, "manga_mode", "auto")
+        mode_index = self.manga_mode.findData(mode)
+        if mode_index >= 0:
+            self.manga_mode.setCurrentIndex(mode_index)
+
+        auto_detect = getattr(conversion_settings, "manga_auto_detect", True)
+        self.manga_auto_detect.setChecked(bool(auto_detect))
 
     def save_settings(self):
         """Save settings to file."""
@@ -217,6 +253,13 @@ class SettingsPage(QWidget):
         settings.conversion_settings.comic_quality = quality_map[
             self.comic_quality.currentIndex()
         ]
+        profile = self.comic_device_profile.currentData()
+        settings.conversion_settings.comic_device_profile = str(profile or "KS")
+        mode = self.manga_mode.currentData()
+        settings.conversion_settings.manga_mode = str(mode or "auto")
+        settings.conversion_settings.manga_auto_detect = (
+            self.manga_auto_detect.isChecked()
+        )
         self.settings_manager.save_settings()
 
     def reset_config(self):

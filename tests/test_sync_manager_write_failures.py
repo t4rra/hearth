@@ -99,7 +99,78 @@ class TestSyncManagerWriteFailures(unittest.TestCase):
             ) as update_meta:
                 self.assertTrue(self.sync.sync_book(self.book))
 
-        update_meta.assert_called_once_with(self.book, downloaded)
+        update_meta.assert_called_once()
+        args, kwargs = update_meta.call_args
+        self.assertEqual(args[0], self.book)
+        self.assertEqual(args[1], downloaded)
+        self.assertIn("kindle_filename", kwargs)
+        self.assertTrue(str(kwargs["kindle_filename"]).endswith(".epub"))
+
+    def test_build_kindle_filename_uses_series_title_author(self):
+        self.book.series_name = "The Expanse"
+        self.book.series_index = "1"
+
+        filename = self.sync._build_kindle_filename(
+            self.book,
+            Path("/tmp/source.mobi"),
+        )
+
+        self.assertEqual(
+            filename,
+            "The Expanse - #1 - Write Failure Test - Test Author.mobi",
+        )
+
+    def test_update_sync_metadata_stores_remote_hearth_path(self):
+        kindle = Mock()
+        kindle.load_metadata.return_value = {}
+        self.sync.kindle = kindle
+
+        self.sync._update_sync_metadata(
+            self.book,
+            Path("/tmp/local-cache.mobi"),
+            kindle_filename="Readable Title - Author.mobi",
+        )
+
+        saved_metadata = kindle.save_metadata.call_args[0][0]
+        saved_entry = saved_metadata[self.book.id]
+        self.assertEqual(
+            saved_entry.local_path,
+            "Documents/Hearth/Readable Title - Author.mobi",
+        )
+
+    def test_apply_book_metadata_overrides_invokes_ebook_meta(self):
+        output_file = self.test_dir / "comic_output.mobi"
+        output_file.write_text("dummy", encoding="utf-8")
+
+        with patch.object(
+            self.sync,
+            "_find_ebook_meta_command",
+            return_value="/usr/local/bin/ebook-meta",
+        ):
+            with patch("hearth.sync.manager.subprocess.run") as run_cmd:
+                run_cmd.return_value = Mock(returncode=0, stdout="", stderr="")
+                self.sync._apply_book_metadata_overrides(output_file, self.book)
+
+        called_cmd = run_cmd.call_args.args[0]
+        self.assertEqual(called_cmd[0], "/usr/local/bin/ebook-meta")
+        self.assertIn("--title", called_cmd)
+        self.assertIn("Write Failure Test", called_cmd)
+        self.assertIn("--authors", called_cmd)
+        self.assertIn("Test Author", called_cmd)
+
+    def test_apply_book_metadata_overrides_skips_without_ebook_meta(self):
+        output_file = self.test_dir / "comic_output.mobi"
+        output_file.write_text("dummy", encoding="utf-8")
+
+        with patch.object(
+            self.sync,
+            "_find_ebook_meta_command",
+            return_value=None,
+        ):
+            with patch("hearth.sync.manager.subprocess.run") as run_cmd:
+                self.sync._apply_book_metadata_overrides(output_file, self.book)
+
+        run_cmd.assert_not_called()
 
     def test_sync_collection_counts_partial_failures(self):
         self.sync.kindle = Mock()
@@ -373,8 +444,15 @@ class TestSyncManagerWriteFailures(unittest.TestCase):
             pushed = self.sync.push_prepared_book_to_kindle(self.book, downloaded)
 
         self.assertTrue(pushed)
-        kindle.copy_to_kindle.assert_called_once_with(downloaded)
-        update_meta.assert_called_once_with(self.book, downloaded)
+        kindle.copy_to_kindle.assert_called_once_with(
+            downloaded,
+            target_filename="Write Failure Test - Test Author.epub",
+        )
+        update_meta.assert_called_once_with(
+            self.book,
+            downloaded,
+            kindle_filename="Write Failure Test - Test Author.epub",
+        )
 
 
 if __name__ == "__main__":

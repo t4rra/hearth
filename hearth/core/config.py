@@ -14,6 +14,9 @@ class ConversionSettings:
     ebook_format: str = "MOBI"  # Target format for ebooks
     comic_quality: str = "high"  # Quality preset for KCC
     remove_margins: bool = True  # Remove margins for Kindle display
+    comic_device_profile: str = "KS"  # KCC device profile
+    manga_mode: str = "auto"  # auto, ltr, rtl
+    manga_auto_detect: bool = True  # metadata-based manga detection
 
     def to_dict(self):
         return asdict(self)

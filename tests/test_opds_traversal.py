@@ -54,6 +54,36 @@ ACQ_FEED = """<?xml version="1.0" encoding="UTF-8"?>
 </feed>
 """
 
+ACQ_FEED_URN_TITLE_WITH_DC = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:dc="http://purl.org/dc/terms/">
+  <entry>
+    <title>urn:booklore:book:42</title>
+    <id>urn:booklore:book:42</id>
+    <dc:title>The Real Book Title</dc:title>
+    <author><name>Jane Author</name></author>
+    <link rel="http://opds-spec.org/acquisition"
+          href="/api/v1/opds/download/42"
+          type="application/epub+zip"/>
+  </entry>
+</feed>
+"""
+
+ACQ_FEED_WITH_SERIES = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Leviathan Wakes</title>
+    <id>book:expanse-1</id>
+    <author><name>James S. A. Corey</name></author>
+    <series>The Expanse</series>
+    <series_index>1</series_index>
+    <link rel="http://opds-spec.org/acquisition"
+          href="/api/v1/opds/download/expanse-1"
+          type="application/epub+zip"/>
+  </entry>
+</feed>
+"""
+
 BOOKLORE_ROOT_FEED = """<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom"
       xmlns:opds="http://opds-spec.org/2010/catalog">
@@ -205,6 +235,26 @@ class TestOPDSTraversal(unittest.TestCase):
         self.assertEqual(len(books), 1)
         self.assertEqual(books[0].title, "Dune")
         self.assertEqual(books[0].download_url, "/api/v1/opds/download/1")
+
+    def test_get_books_from_feed_prefers_readable_title_over_urn(self):
+        client = OPDSClient("https://example.test")
+        feed = feedparser.parse(ACQ_FEED_URN_TITLE_WITH_DC)
+
+        books = client.get_books_from_feed(feed)
+
+        self.assertEqual(len(books), 1)
+        self.assertEqual(books[0].title, "The Real Book Title")
+        self.assertEqual(books[0].id, "urn:booklore:book:42")
+
+    def test_get_books_from_feed_extracts_series_metadata(self):
+        client = OPDSClient("https://example.test")
+        feed = feedparser.parse(ACQ_FEED_WITH_SERIES)
+
+        books = client.get_books_from_feed(feed)
+
+        self.assertEqual(len(books), 1)
+        self.assertEqual(books[0].series_name, "The Expanse")
+        self.assertEqual(books[0].series_index, "1")
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@ class KCCConverter(BaseConverter):
         self.kcc_command: Optional[list[str]] = None
         self._install_attempted = False
         self._seven_zip_shim_dir: Optional[Path] = None
+        self.device_profile: str = "KS"
 
     def _kcc_archive_tool_name(self) -> str:
         """Return the archive tool name required by the active KCC build."""
@@ -490,7 +491,8 @@ class KCCConverter(BaseConverter):
 
         try:
             # Build KCC command
-            cmd = [*self.kcc_command, "-p", "KS", "-o", str(output_path)]
+            profile = (self.device_profile or "KS").strip().upper()
+            cmd = [*self.kcc_command, "-p", profile, "-o", str(output_path)]
 
             # KCC CLI quality tuning: -q is the high-quality mode.
             if self.quality == "high":

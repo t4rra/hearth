@@ -37,6 +37,7 @@ class ConverterManager:
         input_path: Path,
         output_format: ConversionFormat = (ConversionFormat.MOBI),
         source_metadata: Optional[dict[str, str]] = None,
+        conversion_settings=None,
     ) -> ConversionResult:
         """Convert file to specified format using appropriate converter."""
         profile = self.detect_content_profile(
@@ -46,10 +47,26 @@ class ConverterManager:
 
         is_comic = profile["is_comic"]
         is_manga_rtl = profile["is_manga_rtl"]
+        device_profile = "KS"
+
+        if conversion_settings is not None:
+            mode = str(getattr(conversion_settings, "manga_mode", "auto") or "auto")
+            auto_detect = bool(getattr(conversion_settings, "manga_auto_detect", True))
+            device_profile = str(
+                getattr(conversion_settings, "comic_device_profile", "KS") or "KS"
+            )
+
+            if mode == "rtl":
+                is_manga_rtl = True
+            elif mode == "ltr":
+                is_manga_rtl = False
+            elif not auto_detect:
+                is_manga_rtl = False
 
         # Route comics through KCC first; if KCC cannot handle the input type,
         # fallback to Calibre conversion.
         if is_comic and self.comic_converter.can_convert(input_path):
+            self.comic_converter.device_profile = device_profile
             return self.comic_converter.convert(
                 input_path,
                 output_format,

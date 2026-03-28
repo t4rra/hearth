@@ -12,7 +12,11 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
+    QFileDialog,
+    QMessageBox,
+    QAbstractItemView,
 )
+from PyQt6.QtCore import Qt
 
 from ..core.config import SettingsManager
 from ..sync.kindle_device import KindleDevice
@@ -54,10 +58,19 @@ class KindleFilesPage(QWidget):
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self.refresh_files)
         top_bar.addWidget(refresh_btn)
+
+        download_btn = QPushButton("Download")
+        download_btn.clicked.connect(self.download_selected)
+        top_bar.addWidget(download_btn)
+
+        delete_btn = QPushButton("Delete")
+        delete_btn.clicked.connect(self.delete_selected)
+        top_bar.addWidget(delete_btn)
         layout.addLayout(top_bar)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Name", "Type", "Size", "Modified"])
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setColumnWidth(0, 420)
         self.tree.setColumnWidth(1, 120)
         self.tree.setColumnWidth(2, 120)
@@ -169,6 +182,8 @@ class KindleFilesPage(QWidget):
                     item = self._build_entry_item(entry)
                 else:
                     item = QTreeWidgetItem([part, "Folder", "-", "-"])
+                    item.setData(0, Qt.ItemDataRole.UserRole, current_path)
+                    item.setData(0, Qt.ItemDataRole.UserRole + 1, True)
 
                 nodes[current_path] = item
                 if parent_item is None:
@@ -188,8 +203,160 @@ class KindleFilesPage(QWidget):
         mod_time = str(entry.get("mod_time", "") or "-")
         if "T" in mod_time:
             mod_time = mod_time.replace("T", " ")
+        item = QTreeWidgetItem([name, item_type, size_text, mod_time])
+        full_path = str(entry.get("full_path", ""))
+        item.setData(0, Qt.ItemDataRole.UserRole, full_path)
+        item.setData(0, Qt.ItemDataRole.UserRole + 1, is_dir)
+        return item
 
-        return QTreeWidgetItem([name, item_type, size_text, mod_time])
+    def _selected_entries(self) -> list[dict[str, object]]:
+        """Return selected tree entries with path and type metadata."""
+        selected = []
+        for item in self.tree.selectedItems():
+            full_path = item.data(0, Qt.ItemDataRole.UserRole)
+            is_dir = item.data(0, Qt.ItemDataRole.UserRole + 1)
+            if not full_path:
+                continue
+            selected.append(
+                {
+                    "full_path": str(full_path),
+                    "is_dir": bool(is_dir),
+                    "name": item.text(0),
+                }
+            )
+        return selected
+
+    def _unique_destination(self, destination_dir: Path, name: str) -> Path:
+        """Return a non-colliding destination file path."""
+        candidate = destination_dir / name
+        if not candidate.exists():
+            return candidate
+
+        stem = candidate.stem
+        suffix = candidate.suffix
+        counter = 1
+        while True:
+            candidate = destination_dir / f"{stem} ({counter}){suffix}"
+            if not candidate.exists():
+                return candidate
+            counter += 1
+
+    def download_selected(self) -> None:
+        """Download selected files from Kindle to local folder."""
+        device = self._build_kindle_device()
+        if not device.is_connected():
+            QMessageBox.warning(self, "Download", "Kindle is not connected")
+            return
+
+        selected = self._selected_entries()
+        if not selected:
+            QMessageBox.information(
+                self,
+                "Download",
+                "Select file(s) to download",
+            )
+            return
+
+        files = [entry for entry in selected if not entry["is_dir"]]
+        skipped = len(selected) - len(files)
+        if not files:
+            QMessageBox.information(
+                self,
+                "Download",
+                "Selected items are folders",
+            )
+            return
+
+        destination = QFileDialog.getExistingDirectory(
+            self,
+            "Choose Download Destination",
+        )
+        if not destination:
+            return
+
+        destination_dir = Path(destination)
+        success = 0
+        failures = []
+
+        for entry in files:
+            local_path = self._unique_destination(
+                destination_dir,
+                str(entry["name"]),
+            )
+            if device.download_file_from_kindle(
+                str(entry["full_path"]),
+                local_path,
+            ):
+                success += 1
+            else:
+                failures.append(str(entry["name"]))
+
+        status = f"Downloaded {success}/{len(files)} file(s)"
+        if skipped:
+            status += f" (skipped {skipped} folder(s))"
+        self.status_label.setText(status)
+
+        if failures:
+            details = "\n".join(f"- {name}" for name in failures)
+            QMessageBox.warning(
+                self,
+                "Download",
+                "Some files could not be downloaded:\n" + details,
+            )
+
+    def delete_selected(self) -> None:
+        """Delete selected files/folders from Kindle after confirmation."""
+        device = self._build_kindle_device()
+        if not device.is_connected():
+            QMessageBox.warning(self, "Delete", "Kindle is not connected")
+            return
+
+        selected = self._selected_entries()
+        if not selected:
+            QMessageBox.information(self, "Delete", "Select item(s) to delete")
+            return
+
+        count = len(selected)
+        names = "\n".join(f"- {entry['name']}" for entry in selected[:10])
+        if count > 10:
+            names += f"\n... and {count - 10} more"
+
+        reply = QMessageBox.question(
+            self,
+            "Delete from Kindle",
+            (
+                f"Delete {count} selected item(s) from Kindle?\n\n"
+                "This cannot be undone.\n\n"
+                f"{names}"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        deleted = 0
+        failures = []
+        for entry in selected:
+            ok = device.delete_path_from_kindle(
+                str(entry["full_path"]),
+                bool(entry["is_dir"]),
+            )
+            if ok:
+                deleted += 1
+            else:
+                failures.append(str(entry["name"]))
+
+        self.status_label.setText(f"Deleted {deleted}/{count} item(s)")
+        self.refresh_files()
+
+        if failures:
+            details = "\n".join(f"- {name}" for name in failures)
+            QMessageBox.warning(
+                self,
+                "Delete",
+                "Some items could not be deleted:\n" + details,
+            )
 
     def _populate_tree(self, root_path: Path) -> None:
         """Populate tree by recursively scanning root_path."""
