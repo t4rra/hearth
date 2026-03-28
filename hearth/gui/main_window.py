@@ -29,14 +29,14 @@ class HearthMainWindow(QMainWindow):
         layout.addWidget(self.tabs)
 
         # Add pages
-        self.settings_page = SettingsPage()
-        self.converter_page = ConverterPage()
         self.sync_page = SyncPage()
+        self.settings_page = SettingsPage(self.sync_page.sync_manager.kindle)
+        self.converter_page = ConverterPage()
         self.kindle_files_page = KindleFilesPage(self.sync_page.sync_manager.kindle)
 
+        self.tabs.addTab(self.sync_page, "Library")
         self.tabs.addTab(self.settings_page, "Settings")
         self.tabs.addTab(self.converter_page, "Converter")
-        self.tabs.addTab(self.sync_page, "Sync")
         self.tabs.addTab(self.kindle_files_page, "Kindle Files")
 
         # Status bar

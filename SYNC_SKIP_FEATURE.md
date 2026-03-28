@@ -22,6 +22,17 @@ When you run a sync:
 - Only 7 books are downloaded, converted, and sent
 - All 10 checksmarks turn green with "WANTED · ON DEVICE"
 
+### Startup Metadata Reconciliation
+
+At startup, Hearth compares metadata entries against actual files currently present on Kindle:
+
+1. **Read metadata and device file list**: Hearth loads `.hearth_metadata.json` and enumerates files in `Documents/Hearth`
+2. **Detect manual device deletions**: If a metadata entry points to a filename that is no longer on Kindle, Hearth treats it as removed
+3. **Clear stale wanted state**: The entry is updated to `desired_sync=false`, `on_device=false`, and `sync_status="not_synced"`
+4. **Persist updates**: Metadata is saved only when a reconciliation change is required
+
+This prevents books that were manually deleted on Kindle from continuing to appear as "WANTED" in the UI.
+
 ### Delete from Kindle
 
 To delete a book from your Kindle:

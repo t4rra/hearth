@@ -1,5 +1,8 @@
 """Settings page for Hearth GUI."""
 
+from pathlib import Path
+from typing import Optional
+
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -21,11 +24,33 @@ from ..sync.kindle_device import KindleDevice
 class SettingsPage(QWidget):
     """Settings configuration page."""
 
-    def __init__(self):
+    def __init__(self, kindle_device: Optional[KindleDevice] = None):
         super().__init__()
         self.settings_manager = SettingsManager()
+        self._kindle_device = kindle_device
         self.init_ui()
         self.load_settings()
+
+    def _get_kindle_device(self) -> KindleDevice:
+        """Return a KindleDevice configured from current Settings values."""
+        mount_value = self.kindle_path.text().strip()
+        mount_path = Path(mount_value) if mount_value else None
+
+        if self._kindle_device is None:
+            self._kindle_device = KindleDevice(
+                mount_path=mount_path,
+                auto_mount_mtp=self.mtp_auto_mount.isChecked(),
+                preferred_mtp_tool=self.mtp_tool.currentText(),
+                auto_install_mtp_backend=self.mtp_auto_install.isChecked(),
+            )
+            return self._kindle_device
+
+        # Keep the shared device in sync with current settings before actions.
+        self._kindle_device.mount_path = mount_path
+        self._kindle_device.auto_mount_mtp = self.mtp_auto_mount.isChecked()
+        self._kindle_device.preferred_mtp_tool = self.mtp_tool.currentText()
+        self._kindle_device.auto_install_mtp_backend = self.mtp_auto_install.isChecked()
+        return self._kindle_device
 
     def init_ui(self):
         """Initialize UI elements."""
@@ -138,6 +163,9 @@ class SettingsPage(QWidget):
 
         # Buttons
         button_layout = QHBoxLayout()
+        reset_btn = QPushButton("Reset Config")
+        reset_btn.clicked.connect(self.reset_config)
+        button_layout.addWidget(reset_btn)
         save_btn = QPushButton("Save Settings")
         save_btn.clicked.connect(self.save_settings)
         button_layout.addWidget(save_btn)
@@ -191,6 +219,26 @@ class SettingsPage(QWidget):
         ]
         self.settings_manager.save_settings()
 
+    def reset_config(self):
+        """Reset Hearth settings to defaults after confirmation."""
+        answer = QMessageBox.question(
+            self,
+            "Reset Configuration",
+            "Reset all Hearth settings to defaults? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self.settings_manager.reset_settings()
+        self.load_settings()
+        QMessageBox.information(
+            self,
+            "Configuration Reset",
+            "Hearth settings were reset to defaults.",
+        )
+
     def browse_kindle_path(self):
         """Browse for Kindle mount path."""
         path = QFileDialog.getExistingDirectory(
@@ -202,11 +250,7 @@ class SettingsPage(QWidget):
 
     def detect_kindle_path(self):
         """Auto-detect Kindle over USB/MTP and fill mount path when mounted."""
-        device = KindleDevice(
-            auto_mount_mtp=self.mtp_auto_mount.isChecked(),
-            preferred_mtp_tool=self.mtp_tool.currentText(),
-            auto_install_mtp_backend=self.mtp_auto_install.isChecked(),
-        )
+        device = self._get_kindle_device()
         if device.is_connected() and device.get_transport() == "mtp-libmtp":
             self.kindle_path.setText("")
             QMessageBox.information(

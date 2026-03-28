@@ -87,3 +87,8 @@ class SettingsManager:
             if hasattr(self.settings, key):
                 setattr(self.settings, key, value)
         self.save_settings()
+
+    def reset_settings(self) -> None:
+        """Reset settings to defaults and persist to disk."""
+        self.settings = HearthSettings()
+        self.save_settings()

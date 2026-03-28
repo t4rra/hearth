@@ -1,6 +1,9 @@
 """Sync page for Hearth GUI."""
 
+from datetime import datetime
+
 from PyQt6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -79,7 +82,15 @@ class SyncWorker(QThread):
                 )
                 self.finished.emit(opds_ok and kindle_ok, msg)
 
-        except (AttributeError, RuntimeError, ConnectionError, OSError) as error:
+        except (
+            AttributeError,
+            RuntimeError,
+            ConnectionError,
+            OSError,
+            TypeError,
+            ValueError,
+            UnicodeError,
+        ) as error:
             self.finished.emit(False, f"Error: {str(error)}")
 
 
@@ -97,6 +108,8 @@ class SyncPage(QWidget):
         self.installed_book_ids = set()
         self.desired_book_ids = set()
         self.sync_status_by_id = {}
+        self.last_synced_by_id = {}
+        self.on_device_by_id = {}
         self._tree_nodes_by_path = {}
         self._library_root_item = None
         self._startup_status_logged = False
@@ -158,7 +171,14 @@ class SyncPage(QWidget):
 
         # Collections tree (for Collections view)
         self.collections_tree = QTreeWidget()
-        self.collections_tree.setHeaderLabels(["Library", "Status"])
+        self.collections_tree.setHeaderLabels(
+            ["Library", "Status", "Last Synced", "On Device", "Actions"]
+        )
+        self.collections_tree.setColumnWidth(0, 460)
+        self.collections_tree.setColumnWidth(1, 220)
+        self.collections_tree.setColumnWidth(2, 170)
+        self.collections_tree.setColumnWidth(3, 90)
+        self.collections_tree.setColumnWidth(4, 200)
         context_menu_policy = Qt.ContextMenuPolicy.CustomContextMenu
         self.collections_tree.setContextMenuPolicy(context_menu_policy)
         self.collections_tree.customContextMenuRequested.connect(
@@ -261,7 +281,7 @@ class SyncPage(QWidget):
         self.books_by_id = {}
         self._load_installed_books()
 
-        self._library_root_item = QTreeWidgetItem(["Library", ""])
+        self._library_root_item = QTreeWidgetItem(["Library", "", "", "", ""])
         self._set_checkable(self._library_root_item, tri_state=True)
         self._library_root_item.setData(
             0,
@@ -293,6 +313,9 @@ class SyncPage(QWidget):
                 badge_text = ""
             collection_item = self._get_or_create_collection_item(collection)
             collection_item.setText(1, badge_text)
+            collection_item.setText(2, "")
+            collection_item.setText(3, "")
+            collection_item.setText(4, "")
 
             for book in collection.books:
                 if not book.id:
@@ -301,6 +324,11 @@ class SyncPage(QWidget):
                 is_installed = book.id in self.installed_book_ids
                 is_desired = book.id in self.desired_book_ids
                 sync_status = self.sync_status_by_id.get(book.id, "")
+                on_device = bool(self.on_device_by_id.get(book.id, is_installed))
+                on_device_text = "✓" if on_device else ""
+                last_synced = self._format_sync_date(
+                    self.last_synced_by_id.get(book.id, "")
+                )
 
                 if self._has_book_child(collection_item, book.id):
                     continue
@@ -322,7 +350,9 @@ class SyncPage(QWidget):
                     badge = ""
                     book_display = book.title
 
-                book_item = QTreeWidgetItem([book_display, badge])
+                book_item = QTreeWidgetItem(
+                    [book_display, badge, last_synced, on_device_text, ""]
+                )
                 self._set_checkable(book_item)
                 if is_desired:
                     book_item.setCheckState(0, Qt.CheckState.Checked)
@@ -349,6 +379,7 @@ class SyncPage(QWidget):
                     book_item.setForeground(0, brush)
 
                 collection_item.addChild(book_item)
+                self._attach_book_actions(book_item, book, on_device)
 
         self.collections_tree.collapseAll()
         self._library_root_item.setExpanded(True)
@@ -404,7 +435,7 @@ class SyncPage(QWidget):
                 current_parent = existing
                 continue
 
-            node = QTreeWidgetItem([part, ""])
+            node = QTreeWidgetItem([part, "", "", "", ""])
             self._set_checkable(node, tri_state=True)
             node.setData(0, Qt.ItemDataRole.UserRole + 1, "collection")
 
@@ -424,6 +455,8 @@ class SyncPage(QWidget):
         self.installed_book_ids = set()
         self.desired_book_ids = set()
         self.sync_status_by_id = {}
+        self.last_synced_by_id = {}
+        self.on_device_by_id = {}
 
         if self.sync_manager.kindle:
             if not self.sync_manager.is_kindle_connected():
@@ -434,9 +467,52 @@ class SyncPage(QWidget):
             for book_id, meta in metadata.items():
                 if meta.desired_sync:
                     self.desired_book_ids.add(book_id)
-                if meta.on_device or meta.sync_status == "on_device":
+                on_device = bool(meta.on_device or meta.sync_status == "on_device")
+                self.on_device_by_id[book_id] = on_device
+                if on_device:
                     self.installed_book_ids.add(book_id)
                 self.sync_status_by_id[book_id] = meta.sync_status
+                self.last_synced_by_id[book_id] = meta.sync_date
+
+    def _format_sync_date(self, raw: str) -> str:
+        """Format ISO-ish sync timestamp for table display."""
+        value = (raw or "").strip()
+        if not value:
+            return ""
+
+        normalized = value.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return value
+
+        return parsed.strftime("%Y-%m-%d %H:%M")
+
+    def _attach_book_actions(
+        self,
+        item: QTreeWidgetItem,
+        book,
+        on_device: bool,
+    ):
+        """Attach inline action buttons for row-level book operations."""
+        if not on_device:
+            item.setText(4, "-")
+            return
+
+        container = QWidget(self.collections_tree)
+        row_layout = QHBoxLayout(container)
+        row_layout.setContentsMargins(4, 0, 4, 0)
+        row_layout.setSpacing(6)
+
+        resync_btn = QPushButton("Re-Sync")
+        delete_btn = QPushButton("Delete")
+        resync_btn.clicked.connect(lambda _checked=False, b=book: self.resync_book(b))
+        delete_btn.clicked.connect(lambda _checked=False, b=book: self.delete_book(b))
+
+        row_layout.addWidget(resync_btn)
+        row_layout.addWidget(delete_btn)
+        row_layout.addStretch()
+        self.collections_tree.setItemWidget(item, 4, container)
 
     def sync_selected(self):
         """Sync selected books to Kindle."""
@@ -467,11 +543,119 @@ class SyncPage(QWidget):
 
         self.log_output(f"Starting sync of {len(books_to_sync)} book(s)...")
 
+        prepared_books = []
+        skipped_titles = []
         for book in books_to_sync:
-            self.sync_manager.sync_book(
+            prepared = self.sync_manager.prepare_book_for_sync(
                 book,
                 dependency_prompt_callback=self._prompt_dependency_action,
             )
+            if prepared is not None:
+                prepared_books.append((book, prepared))
+            else:
+                skipped_titles.append(book.title)
+
+        if not prepared_books:
+            self.log_output("No books were prepared for push")
+            self._show_sync_summary(
+                requested=len(books_to_sync),
+                synced=0,
+                failed=0,
+                skipped=len(skipped_titles),
+                failed_titles=[],
+                skipped_titles=skipped_titles,
+            )
+            return
+
+        self.log_output(f"Pushing {len(prepared_books)} prepared book(s) to Kindle...")
+
+        synced_titles = []
+        failed_titles = []
+        for book, local_path in prepared_books:
+            if self.sync_manager.push_prepared_book_to_kindle(
+                book,
+                local_path,
+            ):
+                synced_titles.append(book.title)
+            else:
+                failed_titles.append(book.title)
+
+        self._load_installed_books()
+        self.fetch_collections()
+
+        self._show_sync_summary(
+            requested=len(books_to_sync),
+            synced=len(synced_titles),
+            failed=len(failed_titles),
+            skipped=len(skipped_titles),
+            failed_titles=failed_titles,
+            skipped_titles=skipped_titles,
+        )
+
+    def _show_sync_summary(
+        self,
+        requested: int,
+        synced: int,
+        failed: int,
+        skipped: int,
+        failed_titles: list[str],
+        skipped_titles: list[str],
+    ) -> None:
+        """Show sync completion summary with optional eject action."""
+        if failed > 0:
+            icon = QMessageBox.Icon.Warning
+        else:
+            icon = QMessageBox.Icon.Information
+
+        summary_lines = [
+            f"Requested: {requested}",
+            f"Synced: {synced}",
+            f"Failed: {failed}",
+            f"Skipped: {skipped}",
+        ]
+        summary_text = "\n".join(summary_lines)
+
+        details = []
+        if failed_titles:
+            details.append(
+                "Failed books:\n" + "\n".join(f"- {t}" for t in failed_titles)
+            )
+        if skipped_titles:
+            details.append(
+                "Skipped books (conversion/dependency/duplicate):\n"
+                + "\n".join(f"- {t}" for t in skipped_titles)
+            )
+
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Sync Complete")
+        dialog.setIcon(icon)
+        dialog.setText("Sync completed.")
+        dialog.setInformativeText(summary_text)
+        if details:
+            dialog.setDetailedText("\n\n".join(details))
+
+        eject_button = dialog.addButton(
+            "Eject Kindle",
+            QMessageBox.ButtonRole.ActionRole,
+        )
+        dialog.addButton(QMessageBox.StandardButton.Ok)
+        dialog.exec()
+
+        if dialog.clickedButton() == eject_button:
+            self._eject_kindle_connection()
+
+    def _eject_kindle_connection(self) -> None:
+        """Release Hearth's active Kindle connection/session handle."""
+        if not self.sync_manager.kindle:
+            self.log_output("No active Kindle device to eject")
+            return
+
+        self.sync_manager.kindle.close()
+        self.log_output("Released Kindle connection; exiting Hearth")
+
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def _get_checked_books_from_tree(self):
         """Collect checked books in collection tree, deduplicated by ID."""

@@ -95,6 +95,9 @@ class SyncManager:
         opds_ok = self.is_opds_configured()
         kindle_ok = self.is_kindle_connected()
 
+        if kindle_ok and self.kindle:
+            self._reconcile_metadata_with_device_books()
+
         calibre_available = False
         kcc_status: dict[str, object] = {
             "ready": False,
@@ -121,6 +124,77 @@ class SyncManager:
             "kcc": kcc_status,
             "sync_ready": opds_ok and kindle_ok,
         }
+
+    def _reconcile_metadata_with_device_books(self) -> int:
+        """Align metadata with files currently present on Kindle.
+
+        If a user manually deleted a synced file on Kindle, clear desired sync
+        intent so the UI no longer marks that title as wanted.
+        """
+        if not self.kindle:
+            return 0
+
+        metadata = self.kindle.load_metadata()
+        if not metadata:
+            return 0
+
+        try:
+            raw_books = self.kindle.list_books()
+            if isinstance(raw_books, list):
+                device_books = raw_books
+            else:
+                device_books = list(raw_books)
+        except (TypeError, OSError, RuntimeError, AttributeError):
+            return 0
+
+        device_book_names = {name.lower() for name in device_books if name}
+        changed = 0
+
+        for meta in metadata.values():
+            if not meta.local_path:
+                continue
+
+            filename = Path(meta.local_path).name.lower()
+            if not filename:
+                continue
+
+            on_device_now = filename in device_book_names
+            if on_device_now:
+                updated = False
+                if not meta.on_device:
+                    meta.on_device = True
+                    updated = True
+                if meta.sync_status != "on_device":
+                    meta.sync_status = "on_device"
+                    updated = True
+                if updated:
+                    changed += 1
+                continue
+
+            updated = False
+            if meta.on_device:
+                meta.on_device = False
+                updated = True
+            if meta.sync_status != "not_synced":
+                meta.sync_status = "not_synced"
+                updated = True
+            if meta.desired_sync:
+                meta.desired_sync = False
+                updated = True
+            if meta.marked_for_deletion:
+                meta.marked_for_deletion = False
+                updated = True
+            if updated:
+                changed += 1
+
+        if changed:
+            self.kindle.save_metadata(metadata)
+            self._log(
+                "Reconciled Kindle metadata: "
+                f"updated {changed} entry(s) from current device files"
+            )
+
+        return changed
 
     def fetch_books_from_server(self) -> List[Book]:
         """Fetch all available books from OPDS server."""
@@ -266,23 +340,34 @@ class SyncManager:
         force_resync: bool = False,
         dependency_prompt_callback: Optional[Callable[[str, dict], bool]] = None,
     ) -> bool:
-        """Download, convert, and sync a book to Kindle.
+        """Download, convert, and sync a book to Kindle."""
+        prepared_path = self.prepare_book_for_sync(
+            book,
+            force_resync=force_resync,
+            dependency_prompt_callback=dependency_prompt_callback,
+        )
+        if not prepared_path:
+            return False
 
-        If the book is already synced to Kindle and force_resync is False,
-        this will skip download/conversion/sending and return True.
+        return self.push_prepared_book_to_kindle(book, prepared_path)
+
+    def prepare_book_for_sync(
+        self,
+        book: Book,
+        force_resync: bool = False,
+        dependency_prompt_callback: Optional[Callable[[str, dict], bool]] = None,
+    ) -> Optional[Path]:
+        """Download and convert a book to local cache path.
+
+        Returns converted/downloaded local file path, or None if skipped/failed.
         """
         if not self.is_kindle_connected():
             self._log("Error: Kindle device not connected")
-            return False
+            return None
 
-        # Ensure Hearth folder exists on Kindle
         if not self.kindle:
             self._log("Error: Kindle device not available")
-            return False
-
-        if not self.kindle.ensure_hearth_folder_exists():
-            self._log("Error: Could not create Hearth folder on Kindle")
-            return False
+            return None
 
         # Check if already synced (unless force_resync is True)
         if not force_resync:
@@ -295,12 +380,12 @@ class SyncManager:
                 if is_on_device:
                     skip_msg = f"Skipping {book.title} (already synced)"
                     self._log(skip_msg)
-                    return True
+                    return None
 
         # Download book
         downloaded_path = self.download_book(book)
         if not downloaded_path:
-            return False
+            return None
 
         # Convert if needed
         if (
@@ -332,13 +417,13 @@ class SyncManager:
                         self._log(
                             f"Skipping {book.title}: KCC required for comic conversion"
                         )
-                        return False
+                        return None
 
                     if not comic_converter.ensure_kcc_available(allow_bootstrap=True):
                         self._log(
                             f"Skipping {book.title}: KCC install/bootstrap failed"
                         )
-                        return False
+                        return None
 
                 kcc_status = comic_converter.get_runtime_status()
                 if not kcc_status.get("seven_zip_available"):
@@ -353,7 +438,7 @@ class SyncManager:
                         self._log(
                             f"Skipping {book.title}: 7z is required/expected for archives"
                         )
-                        return False
+                        return None
 
             self._log(f"Converting {book.title}...")
             result = self.converter.convert(
@@ -369,23 +454,40 @@ class SyncManager:
 
             if not result.success:
                 self._log(f"Error converting {book.title}: {result.error}")
-                return False
+                return None
 
             if result.output_path is None:
                 self._log(f"Error converting {book.title}: no output file")
-                return False
+                return None
 
             converted_path = result.output_path
         else:
             converted_path = downloaded_path
 
+        self._log(f"Prepared {book.title} for sync: {converted_path}")
+        return converted_path
+
+    def push_prepared_book_to_kindle(self, book: Book, file_path: Path) -> bool:
+        """Copy a locally prepared file to Kindle and persist metadata."""
+        if not self.is_kindle_connected():
+            self._log("Error: Kindle device not connected")
+            return False
+
+        if not self.kindle:
+            self._log("Error: Kindle device not available")
+            return False
+
+        if not self.kindle.ensure_hearth_folder_exists():
+            self._log("Error: Could not create Hearth folder on Kindle")
+            return False
+
         # Copy to Kindle
-        if not self.kindle.copy_to_kindle(converted_path):
+        if not self.kindle.copy_to_kindle(file_path):
             self._log(f"Error copying {book.title} to Kindle")
             return False
 
         # Update metadata
-        self._update_sync_metadata(book, converted_path)
+        self._update_sync_metadata(book, file_path)
 
         self._log(f"Successfully synced {book.title} to Kindle")
         return True

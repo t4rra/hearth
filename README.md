@@ -168,6 +168,7 @@ python main.py
    - Switch to "All Books" view for flat list
    - Filter by: All Books, Not Installed, Installed
    - Select multiple books and sync them
+   - Startup reconciliation keeps the local sync metadata aligned with real Kindle files; if a previously synced book was manually removed on device, Hearth clears its "wanted" state on next startup
 
 ### Format Conversion
 

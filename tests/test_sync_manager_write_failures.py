@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from hearth.core.config import HearthSettings
 from hearth.core.opds_client import Book
+from hearth.sync.kindle_device import KindleMetadata
 from hearth.sync.manager import SyncManager
 
 
@@ -49,15 +50,22 @@ class TestSyncManagerWriteFailures(unittest.TestCase):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
     def test_sync_book_fails_when_hearth_folder_cannot_be_created(self):
+        downloaded = self.test_dir / "downloaded.epub"
+        downloaded.write_text("book", encoding="utf-8")
+
         kindle = Mock()
         kindle.is_connected.return_value = True
         kindle.ensure_hearth_folder_exists.return_value = False
+        kindle.load_metadata.return_value = {}
         self.sync.kindle = kindle
 
-        with patch.object(self.sync, "download_book") as download_book:
+        with patch.object(
+            self.sync, "download_book", return_value=downloaded
+        ) as download_book:
             self.assertFalse(self.sync.sync_book(self.book))
 
-        download_book.assert_not_called()
+        download_book.assert_called_once_with(self.book)
+        kindle.copy_to_kindle.assert_not_called()
 
     def test_sync_book_fails_when_copy_to_kindle_fails(self):
         downloaded = self.test_dir / "downloaded.epub"
@@ -162,6 +170,7 @@ class TestSyncManagerWriteFailures(unittest.TestCase):
     def test_get_startup_status_reports_converter_tooling(self):
         self.sync.kindle = Mock()
         self.sync.kindle.is_connected.return_value = True
+        self.sync.kindle.load_metadata.return_value = {}
 
         mock_calibre = Mock()
         mock_calibre.ebook_convert_path = "/usr/local/bin/ebook-convert"
@@ -184,6 +193,71 @@ class TestSyncManagerWriteFailures(unittest.TestCase):
         self.assertTrue(status["calibre_available"])
         self.assertFalse(status["kcc"]["ready"])
         self.assertIn("KCC command not detected", status["kcc"]["issues"])
+
+    def test_startup_status_reconciles_manual_device_deletions(self):
+        self.sync.kindle = Mock()
+        self.sync.kindle.is_connected.return_value = True
+
+        stale_entry = KindleMetadata(
+            title="Manually Deleted",
+            author="Reader",
+            opds_id="book-missing-1",
+            original_format="epub",
+            kindle_format="mobi",
+            sync_date="2026-03-27T00:00:00",
+            local_path="Documents/Hearth/book-missing-1.mobi",
+            desired_sync=True,
+            on_device=True,
+            sync_status="on_device",
+            marked_for_deletion=True,
+        )
+        metadata = {"book-missing-1": stale_entry}
+        self.sync.kindle.load_metadata.return_value = metadata
+        self.sync.kindle.list_books.return_value = ["different-book.mobi"]
+
+        self.sync.converter = Mock()
+        self.sync.converter.ebook_converter = Mock(ebook_convert_path=None)
+        self.sync.converter.comic_converter = Mock(
+            get_runtime_status=Mock(return_value={"ready": True, "issues": []})
+        )
+
+        self.sync.get_startup_status()
+
+        self.assertFalse(stale_entry.desired_sync)
+        self.assertFalse(stale_entry.on_device)
+        self.assertFalse(stale_entry.marked_for_deletion)
+        self.assertEqual(stale_entry.sync_status, "not_synced")
+        self.sync.kindle.save_metadata.assert_called_once_with(metadata)
+
+    def test_startup_status_does_not_write_when_metadata_matches_device(self):
+        self.sync.kindle = Mock()
+        self.sync.kindle.is_connected.return_value = True
+
+        synced_entry = KindleMetadata(
+            title="Still Present",
+            author="Reader",
+            opds_id="book-present-1",
+            original_format="epub",
+            kindle_format="mobi",
+            sync_date="2026-03-27T00:00:00",
+            local_path="Documents/Hearth/book-present-1.mobi",
+            desired_sync=True,
+            on_device=True,
+            sync_status="on_device",
+            marked_for_deletion=False,
+        )
+        self.sync.kindle.load_metadata.return_value = {"book-present-1": synced_entry}
+        self.sync.kindle.list_books.return_value = ["book-present-1.mobi"]
+
+        self.sync.converter = Mock()
+        self.sync.converter.ebook_converter = Mock(ebook_convert_path=None)
+        self.sync.converter.comic_converter = Mock(
+            get_runtime_status=Mock(return_value={"ready": True, "issues": []})
+        )
+
+        self.sync.get_startup_status()
+
+        self.sync.kindle.save_metadata.assert_not_called()
 
     def test_sync_book_skips_comic_when_kcc_declined(self):
         self.sync.settings.auto_convert = True
@@ -275,6 +349,32 @@ class TestSyncManagerWriteFailures(unittest.TestCase):
             allow_bootstrap=True
         )
         converter.convert.assert_called_once()
+
+    def test_prepare_then_push_two_phase_sync(self):
+        self.sync.settings.auto_convert = False
+
+        downloaded = self.test_dir / "downloaded.epub"
+        downloaded.write_text("book", encoding="utf-8")
+
+        kindle = Mock()
+        kindle.is_connected.return_value = True
+        kindle.ensure_hearth_folder_exists.return_value = True
+        kindle.load_metadata.return_value = {}
+        kindle.copy_to_kindle.return_value = True
+        self.sync.kindle = kindle
+
+        with patch.object(self.sync, "download_book", return_value=downloaded):
+            prepared = self.sync.prepare_book_for_sync(self.book)
+
+        self.assertEqual(prepared, downloaded)
+        kindle.copy_to_kindle.assert_not_called()
+
+        with patch.object(self.sync, "_update_sync_metadata") as update_meta:
+            pushed = self.sync.push_prepared_book_to_kindle(self.book, downloaded)
+
+        self.assertTrue(pushed)
+        kindle.copy_to_kindle.assert_called_once_with(downloaded)
+        update_meta.assert_called_once_with(self.book, downloaded)
 
 
 if __name__ == "__main__":

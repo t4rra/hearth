@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -119,10 +120,21 @@ class _LibMTPBackend:
     def __init__(self, debug_callback):
         self._debug = debug_callback
         self._lib = self._load_library()
+        self._lock = threading.RLock()
         self._device_ptr: Optional[ctypes.POINTER(_LIBMTPDevice)] = None
         self.ROOT_OBJECT_ID = 0xFFFFFFFF
         self._opened_at: float = 0.0
+        self._last_nonempty_snapshot: Optional[
+            Tuple[Dict[int, _MTPFolderNode], Dict[int, _MTPFileNode]]
+        ] = None
+        self._last_snapshot_at: float = 0.0
+        self._snapshot_reuse_window_sec: float = 20.0
+        self._snapshot_probe_attempts: int = 3
+        self._snapshot_probe_delay_sec: float = 0.08
+        self._snapshot_low_quality_ratio: float = 0.60
+        self._snapshot_low_quality_floor: int = 8
         self._clear_errorstack_fn = None
+        self._delete_object_fn = None
         self._filetype_candidates: Optional[List[Tuple[int, str]]] = None
         destroy_env = os.environ.get("HEARTH_MTP_DESTROY_LISTINGS", "").strip().lower()
         if destroy_env in {"1", "true", "yes", "on"}:
@@ -234,6 +246,12 @@ class _LibMTPBackend:
             clear_errorstack.argtypes = [ctypes.POINTER(_LIBMTPDevice)]
             clear_errorstack.restype = None
         self._clear_errorstack_fn = clear_errorstack
+
+        delete_object = getattr(lib, "LIBMTP_Delete_Object", None)
+        if delete_object is not None:
+            delete_object.argtypes = [ctypes.POINTER(_LIBMTPDevice), ctypes.c_uint32]
+            delete_object.restype = ctypes.c_int
+        self._delete_object_fn = delete_object
         return lib
 
     def _clear_errorstack(self) -> None:
@@ -245,304 +263,230 @@ class _LibMTPBackend:
         return self._lib is not None
 
     def ensure_connected(self) -> bool:
-        if not self._lib:
-            return False
-        if self._device_ptr:
+        with self._lock:
+            if not self._lib:
+                return False
+            if self._device_ptr:
+                return True
+
+            self._lib.LIBMTP_Init()
+
+            raw_devices = ctypes.POINTER(_LIBMTPRawDevice)()
+            count = ctypes.c_int(0)
+            rc = self._lib.LIBMTP_Detect_Raw_Devices(
+                ctypes.byref(raw_devices),
+                ctypes.byref(count),
+            )
+            if rc != 0 or count.value <= 0:
+                self._debug("libmtp raw-device detect found no devices")
+                return False
+
+            chosen_index = 0
+            for idx in range(count.value):
+                candidate = raw_devices[idx]
+                vendor = self._decode_cstr(candidate.device_entry.vendor)
+                product = self._decode_cstr(candidate.device_entry.product)
+                vendor_id = int(candidate.device_entry.vendor_id)
+                info = (
+                    f"vendor={vendor.strip()} "
+                    f"product={product.strip()} vid={vendor_id:#06x}"
+                )
+                self._debug(f"libmtp raw device {idx}: {info}")
+
+                vendor_text = f"{vendor} {product}".lower()
+                if (
+                    vendor_id == 0x1949
+                    or "amazon" in vendor_text
+                    or "kindle" in vendor_text
+                ):
+                    chosen_index = idx
+                    break
+
+            chosen = raw_devices[chosen_index]
+            device_ptr = self._lib.LIBMTP_Open_Raw_Device_Uncached(ctypes.byref(chosen))
+            if not device_ptr:
+                self._debug("LIBMTP_Open_Raw_Device_Uncached returned null device")
+                return False
+
+            self._device_ptr = device_ptr
+            self._opened_at = time.monotonic()
+            self._debug("Opened persistent libmtp device handle")
             return True
 
-        self._lib.LIBMTP_Init()
-
-        raw_devices = ctypes.POINTER(_LIBMTPRawDevice)()
-        count = ctypes.c_int(0)
-        rc = self._lib.LIBMTP_Detect_Raw_Devices(
-            ctypes.byref(raw_devices),
-            ctypes.byref(count),
-        )
-        if rc != 0 or count.value <= 0:
-            self._debug("libmtp raw-device detect found no devices")
-            return False
-
-        chosen = None
-        for idx in range(count.value):
-            candidate = raw_devices[idx]
-            vendor = self._decode_cstr(candidate.device_entry.vendor)
-            product = self._decode_cstr(candidate.device_entry.product)
-            vendor_id = int(candidate.device_entry.vendor_id)
-            info = f"vendor={vendor.strip()} product={product.strip()} vid={vendor_id:#06x}"
-            self._debug(f"libmtp raw device {idx}: {info}")
-            if vendor_id == 0x1949 or "kindle" in f"{vendor} {product}".lower():
-                chosen = candidate
-                break
-            if chosen is None:
-                chosen = candidate
-
-        if chosen is None:
-            return False
-
-        device_ptr = self._lib.LIBMTP_Open_Raw_Device_Uncached(ctypes.byref(chosen))
-        if not device_ptr:
-            self._debug("libmtp failed to open selected raw device")
-            return False
-
-        self._device_ptr = device_ptr
-        self._opened_at = time.monotonic()
-        self._debug("Opened persistent libmtp device handle")
-        return True
-
     def release(self) -> None:
-        if not self._device_ptr or not self._lib:
-            return
-        self._lib.LIBMTP_Release_Device(self._device_ptr)
-        self._device_ptr = None
-        self._debug("Released persistent libmtp device handle")
+        with self._lock:
+            if not self._lib or not self._device_ptr:
+                return
+            try:
+                self._lib.LIBMTP_Release_Device(self._device_ptr)
+                self._debug("Released persistent libmtp device handle")
+            finally:
+                self._device_ptr = None
+                self._last_nonempty_snapshot = None
+                self._last_snapshot_at = 0.0
 
-    def _decode_cstr(self, value: object) -> str:
+    @staticmethod
+    def _decode_cstr(value) -> str:
         if not value:
             return ""
-        if isinstance(value, int):
-            ptr = ctypes.cast(value, ctypes.c_char_p)
-            if not ptr or not ptr.value:
-                return ""
-            value = ptr.value
-        if isinstance(value, ctypes.c_char_p):
-            value = value.value
-        if isinstance(value, str):
-            return value
-        if not isinstance(value, (bytes, bytearray)):
-            return ""
-        return value.decode("utf-8", errors="ignore")
-
-    def _scan_filetype_candidates(self) -> List[Tuple[int, str]]:
-        """Cache valid libmtp filetype descriptions for upload selection."""
-        if self._filetype_candidates is not None:
-            return self._filetype_candidates
-
-        if not self._lib:
-            self._filetype_candidates = []
-            return self._filetype_candidates
-
-        candidates: List[Tuple[int, str]] = []
-        for filetype in range(0, 128):
-            try:
-                desc_ptr = self._lib.LIBMTP_Get_Filetype_Description(filetype)
-            except (AttributeError, OSError):
-                break
-
-            desc = self._decode_cstr(desc_ptr).strip().lower()
-            if desc:
-                candidates.append((filetype, desc))
-
-        self._filetype_candidates = candidates
-        return candidates
-
-    def _resolve_filetype(self, terms: List[str]) -> Optional[int]:
-        """Resolve a libmtp filetype id by matching description keywords."""
-        candidates = self._scan_filetype_candidates()
-        for term in terms:
-            for filetype, desc in candidates:
-                if "folder" in desc:
-                    continue
-                if term in desc:
-                    return filetype
-        return None
-
-    def _pick_upload_filetype(self, local_file: Path) -> int:
-        """Pick a non-folder libmtp filetype for uploaded files."""
-        suffix = local_file.suffix.lower()
-        preferred_terms = {
-            ".mobi": ["mobi", "ebook", "book", "document", "unknown"],
-            ".azw": ["azw", "ebook", "book", "document", "unknown"],
-            ".azw3": ["azw", "ebook", "book", "document", "unknown"],
-            ".kfx": ["kfx", "ebook", "book", "document", "unknown"],
-            ".epub": ["epub", "ebook", "book", "document", "unknown"],
-            ".pdf": ["pdf", "document", "unknown"],
-            ".txt": ["text", "txt", "document", "unknown"],
-        }
-
-        terms = preferred_terms.get(
-            suffix,
-            ["unknown", "binary", "application", "document"],
-        )
-        resolved = self._resolve_filetype(terms)
-        if resolved is not None:
-            return resolved
-
-        # Fallback: first non-folder descriptor, or zero if unavailable.
-        for filetype, desc in self._scan_filetype_candidates():
-            if "folder" not in desc:
-                return filetype
-        return 0
-
-    def _read_folder_map(self) -> Dict[int, _MTPFolderNode]:
-        folders: Dict[int, _MTPFolderNode] = {}
-        if not self.ensure_connected() or not self._lib or not self._device_ptr:
-            return folders
-
-        root_ptr = self._lib.LIBMTP_Get_Folder_List(self._device_ptr)
-        if not root_ptr:
-            return folders
-
-        def walk(node_ptr, parent_path: str) -> None:
-            current = node_ptr
-            while current:
-                node = current.contents
-                name = self._decode_cstr(node.name).strip()
-                if not name:
-                    name = str(node.folder_id)
-                full_path = f"{parent_path}/{name}" if parent_path else f"/{name}"
-                folders[int(node.folder_id)] = _MTPFolderNode(
-                    item_id=int(node.folder_id),
-                    parent_id=int(node.parent_id),
-                    storage_id=int(node.storage_id),
-                    name=name,
-                    full_path=full_path,
-                )
-                if node.child:
-                    walk(node.child, full_path)
-                current = node.sibling
-
-        walk(root_ptr, "")
-        if self._destroy_listing_buffers:
-            self._lib.LIBMTP_destroy_folder_t(root_ptr)
-        return folders
-
-    def _read_files(
-        self, folders: Dict[int, _MTPFolderNode]
-    ) -> Dict[int, _MTPFileNode]:
-        files: Dict[int, _MTPFileNode] = {}
-        if not self.ensure_connected() or not self._lib or not self._device_ptr:
-            return files
-
-        file_ptr = self._lib.LIBMTP_Get_Filelisting_With_Callback(
-            self._device_ptr,
-            None,
-            None,
-        )
-        if not file_ptr:
-            self._debug("libmtp returned empty file listing pointer")
-            return files
-
-        current = file_ptr
-        while current:
-            item = current.contents
-            file_id = int(item.item_id)
-            parent_id = int(item.parent_id)
-            folder_path = folders.get(parent_id)
-            filename = self._decode_cstr(item.filename).strip()
-            if not filename:
-                filename = str(file_id)
-            base_path = folder_path.full_path if folder_path else ""
-            full_path = f"{base_path}/{filename}" if base_path else f"/{filename}"
-
-            mod_time = ""
-            if int(item.modificationdate) > 0:
-                try:
-                    mod_time = datetime.fromtimestamp(
-                        int(item.modificationdate)
-                    ).isoformat()
-                except (OSError, ValueError):
-                    mod_time = ""
-
-            files[file_id] = _MTPFileNode(
-                item_id=file_id,
-                parent_id=parent_id,
-                storage_id=int(item.storage_id),
-                name=filename,
-                full_path=full_path,
-                size=int(item.filesize),
-                mod_time=mod_time,
-            )
-            current = item.next
-
-        if self._destroy_listing_buffers:
-            self._lib.LIBMTP_destroy_file_t(file_ptr)
-        self._debug(f"libmtp file listing count={len(files)}")
-        return files
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="ignore")
+        return str(value)
 
     def _snapshot_via_files_and_folders(
         self,
     ) -> Tuple[Dict[int, _MTPFolderNode], Dict[int, _MTPFileNode]]:
-        folders: Dict[int, _MTPFolderNode] = {}
-        files: Dict[int, _MTPFileNode] = {}
-        if not self.ensure_connected() or not self._lib or not self._device_ptr:
-            return folders, files
+        with self._lock:
+            if not self.ensure_connected() or not self._lib or not self._device_ptr:
+                return {}, {}
 
-        visited: set[Tuple[int, int]] = set()
+            def collect_once() -> (
+                Tuple[Dict[int, _MTPFolderNode], Dict[int, _MTPFileNode]]
+            ):
+                folders: Dict[int, _MTPFolderNode] = {}
+                files: Dict[int, _MTPFileNode] = {}
+                visited: set[Tuple[int, int]] = set()
 
-        def is_folder_type(filetype: int) -> bool:
-            desc_ptr = self._lib.LIBMTP_Get_Filetype_Description(filetype)
-            desc = self._decode_cstr(desc_ptr)
-            return "folder" in desc.lower()
+                def is_folder_type(filetype: int) -> bool:
+                    desc_ptr = self._lib.LIBMTP_Get_Filetype_Description(filetype)
+                    desc = self._decode_cstr(desc_ptr)
+                    return "folder" in desc.lower()
 
-        def walk(storage_id: int, parent_id: int, parent_path: str) -> None:
-            key = (storage_id, parent_id)
-            if key in visited:
-                return
-            visited.add(key)
+                def walk(storage_id: int, parent_id: int, parent_path: str) -> None:
+                    key = (storage_id, parent_id)
+                    if key in visited:
+                        return
+                    visited.add(key)
 
-            listing = self._lib.LIBMTP_Get_Files_And_Folders(
-                self._device_ptr,
-                storage_id,
-                parent_id,
-            )
-            if not listing:
-                return
+                    listing = self._lib.LIBMTP_Get_Files_And_Folders(
+                        self._device_ptr,
+                        storage_id,
+                        parent_id,
+                    )
+                    if not listing:
+                        return
 
-            try:
-                current = listing
-                while current:
-                    item = current.contents
-                    item_id = int(item.item_id)
-                    item_parent_id = int(item.parent_id)
-                    item_storage_id = int(item.storage_id)
-                    name = self._decode_cstr(item.filename).strip()
-                    if not name:
-                        name = str(item_id)
-                    full_path = f"{parent_path}/{name}" if parent_path else f"/{name}"
+                    try:
+                        current = listing
+                        while current:
+                            item = current.contents
+                            item_id = int(item.item_id)
+                            item_parent_id = int(item.parent_id)
+                            item_storage_id = int(item.storage_id)
+                            name = self._decode_cstr(item.filename).strip()
+                            if not name:
+                                name = str(item_id)
+                            if parent_path:
+                                full_path = f"{parent_path}/{name}"
+                            else:
+                                full_path = f"/{name}"
 
-                    if is_folder_type(int(item.filetype)):
-                        folders[item_id] = _MTPFolderNode(
-                            item_id=item_id,
-                            parent_id=item_parent_id,
-                            storage_id=item_storage_id,
-                            name=name,
-                            full_path=full_path,
-                        )
-                        walk(item_storage_id, item_id, full_path)
-                    else:
-                        mod_time = ""
-                        if int(item.modificationdate) > 0:
-                            try:
-                                mod_time = datetime.fromtimestamp(
-                                    int(item.modificationdate)
-                                ).isoformat()
-                            except (OSError, ValueError):
+                            if is_folder_type(int(item.filetype)):
+                                folders[item_id] = _MTPFolderNode(
+                                    item_id=item_id,
+                                    parent_id=item_parent_id,
+                                    storage_id=item_storage_id,
+                                    name=name,
+                                    full_path=full_path,
+                                )
+                                walk(item_storage_id, item_id, full_path)
+                            else:
                                 mod_time = ""
+                                if int(item.modificationdate) > 0:
+                                    try:
+                                        mod_time = datetime.fromtimestamp(
+                                            int(item.modificationdate)
+                                        ).isoformat()
+                                    except (OSError, ValueError):
+                                        mod_time = ""
 
-                        files[item_id] = _MTPFileNode(
-                            item_id=item_id,
-                            parent_id=item_parent_id,
-                            storage_id=item_storage_id,
-                            name=name,
-                            full_path=full_path,
-                            size=int(item.filesize),
-                            mod_time=mod_time,
-                        )
+                                files[item_id] = _MTPFileNode(
+                                    item_id=item_id,
+                                    parent_id=item_parent_id,
+                                    storage_id=item_storage_id,
+                                    name=name,
+                                    full_path=full_path,
+                                    size=int(item.filesize),
+                                    mod_time=mod_time,
+                                )
 
-                    current = item.next
-            finally:
-                if self._destroy_listing_buffers:
-                    self._lib.LIBMTP_destroy_file_t(listing)
+                            current = item.next
+                    finally:
+                        if self._destroy_listing_buffers:
+                            self._lib.LIBMTP_destroy_file_t(listing)
 
-        walk(0, self.ROOT_OBJECT_ID, "")
-        if not folders and not files:
-            walk(0x00010001, self.ROOT_OBJECT_ID, "")
+                walk(0, self.ROOT_OBJECT_ID, "")
+                if not folders and not files:
+                    walk(0x00010001, self.ROOT_OBJECT_ID, "")
+                return folders, files
 
-        self._debug(
-            "libmtp files+folders fallback "
-            f"folders={len(folders)} files={len(files)}"
-        )
-        return folders, files
+            best_folders: Dict[int, _MTPFolderNode] = {}
+            best_files: Dict[int, _MTPFileNode] = {}
+            best_total = 0
+
+            for attempt in range(self._snapshot_probe_attempts):
+                folders, files = collect_once()
+                total = len(folders) + len(files)
+                if total > best_total:
+                    best_folders = folders
+                    best_files = files
+                    best_total = total
+
+                if attempt + 1 < self._snapshot_probe_attempts:
+                    time.sleep(self._snapshot_probe_delay_sec)
+
+            folders = best_folders
+            files = best_files
+            folder_count = len(folders)
+            file_count = len(files)
+            self._debug(
+                "libmtp files+folders fallback "
+                f"folders={folder_count} files={file_count}"
+            )
+
+            now = time.monotonic()
+            previous_total = 0
+            if self._last_nonempty_snapshot is not None:
+                previous_total = len(self._last_nonempty_snapshot[0]) + len(
+                    self._last_nonempty_snapshot[1]
+                )
+
+            if folder_count or file_count:
+                new_total = folder_count + file_count
+                low_quality_threshold = max(
+                    self._snapshot_low_quality_floor,
+                    int(previous_total * self._snapshot_low_quality_ratio),
+                )
+                if (
+                    previous_total > 0
+                    and new_total < low_quality_threshold
+                    and (now - self._last_snapshot_at)
+                    <= self._snapshot_reuse_window_sec
+                    and self._last_nonempty_snapshot is not None
+                ):
+                    cached_folders, cached_files = self._last_nonempty_snapshot
+                    self._debug(
+                        "libmtp suspicious low listing; reusing recent snapshot "
+                        f"new={new_total} cached={previous_total}"
+                    )
+                    return dict(cached_folders), dict(cached_files)
+
+                self._last_nonempty_snapshot = (dict(folders), dict(files))
+                self._last_snapshot_at = now
+                return folders, files
+
+            if (
+                self._last_nonempty_snapshot is not None
+                and (now - self._last_snapshot_at) <= self._snapshot_reuse_window_sec
+            ):
+                cached_folders, cached_files = self._last_nonempty_snapshot
+                self._debug(
+                    "libmtp transient empty listing; reusing recent snapshot "
+                    f"folders={len(cached_folders)} files={len(cached_files)}"
+                )
+                return dict(cached_folders), dict(cached_files)
+
+            return folders, files
 
     def snapshot(self) -> Tuple[Dict[int, _MTPFolderNode], Dict[int, _MTPFileNode]]:
         # Prefer the recursive files-and-folders API because some libmtp builds
@@ -604,6 +548,49 @@ class _LibMTPBackend:
             current_storage = created.storage_id
 
         return current_node
+
+    def _resolve_filetype(self, terms: List[str]) -> Optional[int]:
+        if not self._lib:
+            return None
+
+        if self._filetype_candidates is None:
+            candidates: List[Tuple[int, str]] = []
+            for filetype in range(0, 256):
+                desc_ptr = self._lib.LIBMTP_Get_Filetype_Description(filetype)
+                desc = self._decode_cstr(desc_ptr).strip().lower()
+                if not desc or "folder" in desc:
+                    continue
+                candidates.append((filetype, desc))
+            self._filetype_candidates = candidates
+
+        for term in terms:
+            needle = term.lower()
+            for filetype, desc in self._filetype_candidates:
+                if needle in desc:
+                    return filetype
+        return None
+
+    def _pick_upload_filetype(self, local_file: Path) -> int:
+        ext = local_file.suffix.lower()
+        preferred_terms = {
+            ".pdf": ["pdf"],
+            ".epub": ["epub"],
+            ".mobi": ["mobi", "mobipocket"],
+            ".azw": ["azw", "mobipocket"],
+            ".azw3": ["azw3", "kindle"],
+            ".kfx": ["kfx"],
+        }
+        terms = preferred_terms.get(ext, [])
+
+        resolved = self._resolve_filetype(terms)
+        if resolved is not None:
+            return resolved
+
+        fallback = self._resolve_filetype(["unknown", "file"])
+        if fallback is not None:
+            return fallback
+
+        return 0
 
     def send_file(self, local_file: Path, remote_dir: str) -> bool:
         if not self.ensure_connected() or not self._lib or not self._device_ptr:
@@ -690,6 +677,117 @@ class _LibMTPBackend:
             )
 
         return sorted(entries, key=lambda row: str(row.get("full_path", "")).lower())
+
+    def _path_matches_or_child(self, full_path: str, prefix: str) -> bool:
+        full = full_path.strip().strip("/").replace("\\", "/").lower()
+        base = prefix.strip().strip("/").replace("\\", "/").lower()
+        if full == base or full.startswith(f"{base}/"):
+            return True
+
+        # Some MTP backends include storage-root prefixes in reported paths,
+        # e.g. "internal storage/documents/Hearth/...".
+        return full.endswith(f"/{base}") or f"/{base}/" in full
+
+    def remove_folder(self, remote_path: str) -> bool:
+        """Remove a folder and its descendants from Kindle MTP storage."""
+        if not self._delete_object_fn:
+            self._debug("remove_folder: delete API unavailable")
+            return False
+        if not self.ensure_connected() or not self._device_ptr:
+            self._debug("remove_folder: backend not connected")
+            return False
+
+        folders, files = self.snapshot()
+        target = remote_path.strip().strip("/").replace("\\", "/")
+        self._debug(
+            f"remove_folder: target='{target}' snapshot folders={len(folders)} files={len(files)}"
+        )
+        folder_ids = [
+            folder.item_id
+            for folder in folders.values()
+            if self._path_matches_or_child(folder.full_path, target)
+        ]
+        file_ids = [
+            file_node.item_id
+            for file_node in files.values()
+            if self._path_matches_or_child(file_node.full_path, target)
+        ]
+
+        if not folder_ids and not file_ids:
+            self._debug("remove_folder: no matching folder/file object IDs")
+            return False
+
+        self._debug(
+            f"remove_folder: matched folder_ids={folder_ids} file_ids={file_ids}"
+        )
+
+        for file_id in file_ids:
+            rc = self._delete_object_fn(self._device_ptr, ctypes.c_uint32(file_id))
+            if rc != 0:
+                self._debug(
+                    f"remove_folder: file delete failed item_id={file_id} rc={rc}"
+                )
+                self._clear_errorstack()
+                return False
+            self._debug(f"remove_folder: file deleted item_id={file_id}")
+
+        folder_ids_sorted = sorted(
+            folder_ids,
+            key=lambda item_id: len(folders[item_id].full_path),
+            reverse=True,
+        )
+        for folder_id in folder_ids_sorted:
+            rc = self._delete_object_fn(self._device_ptr, ctypes.c_uint32(folder_id))
+            if rc != 0:
+                self._debug(
+                    f"remove_folder: folder delete failed item_id={folder_id} rc={rc}"
+                )
+                self._clear_errorstack()
+                return False
+            self._debug(f"remove_folder: folder deleted item_id={folder_id}")
+
+        return True
+
+    def delete_file_by_path(self, remote_file: str) -> bool:
+        """Delete a single file by full remote path on Kindle MTP storage."""
+        if not self._delete_object_fn:
+            self._debug("delete_file_by_path: delete API unavailable")
+            return False
+        if not self.ensure_connected() or not self._device_ptr:
+            self._debug("delete_file_by_path: backend not connected")
+            return False
+
+        _, files = self.snapshot()
+        target = remote_file.strip().strip("/").replace("\\", "/")
+        self._debug(
+            f"delete_file_by_path: target='{target}' snapshot files={len(files)}"
+        )
+        for file_node in files.values():
+            if not self._path_matches_or_child(file_node.full_path, target):
+                continue
+            if (
+                file_node.full_path.strip().strip("/").replace("\\", "/").lower()
+                != target.lower()
+            ):
+                continue
+            rc = self._delete_object_fn(
+                self._device_ptr,
+                ctypes.c_uint32(file_node.item_id),
+            )
+            if rc != 0:
+                self._debug(
+                    f"delete_file_by_path: delete failed item_id={file_node.item_id} rc={rc}"
+                )
+                self._clear_errorstack()
+                return False
+            self._debug(
+                "delete_file_by_path: deleted "
+                f"path='{file_node.full_path}' item_id={file_node.item_id}"
+            )
+            return True
+
+        self._debug("delete_file_by_path: no exact path match found")
+        return False
 
 
 class KindleDevice:
@@ -850,6 +948,19 @@ class KindleDevice:
 
     def delete_file_from_kindle(self, remote_filename: str) -> bool:
         """Delete a file from Kindle Hearth folder."""
+        if self._detect_mtp_kindle():
+            backend = self._get_mtp_backend()
+            if not backend:
+                return False
+
+            for remote_dir in self._mtp_hearth_candidates():
+                remote_path = f"{remote_dir.rstrip('/')}/{remote_filename.lstrip('/')}"
+                if backend.delete_file_by_path(remote_path):
+                    return True
+                if self._mtp_cli_delete(remote_path):
+                    return True
+            return False
+
         hearth_dir = self.get_hearth_dir()
         if not hearth_dir:
             return False
@@ -885,8 +996,15 @@ class KindleDevice:
                     ) as file_handle:
                         data = json.load(file_handle)
                     return {key: KindleMetadata(**value) for key, value in data.items()}
-                except (OSError, json.JSONDecodeError, TypeError):
-                    return {}
+                except (
+                    OSError,
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    TypeError,
+                    ValueError,
+                ):
+                    self._debug("load_metadata: unreadable MTP metadata file; ignoring")
+                    continue
             return {}
 
         hearth_dir = self.get_hearth_dir()
@@ -901,7 +1019,14 @@ class KindleDevice:
             with open(metadata_file, "r", encoding="utf-8") as file_handle:
                 data = json.load(file_handle)
             return {key: KindleMetadata(**value) for key, value in data.items()}
-        except (OSError, json.JSONDecodeError, TypeError):
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ):
+            self._debug("load_metadata: unreadable USB metadata file; ignoring")
             return {}
 
     def save_metadata(self, metadata_dict: Dict[str, KindleMetadata]) -> bool:
@@ -1235,6 +1360,41 @@ class KindleDevice:
             "/documents/Hearth",
             "/Documents/Hearth",
         ]
+
+    def _mtp_cli_delete(self, remote_path: str) -> bool:
+        """Delete a remote MTP object via mtp-connect CLI fallback."""
+        enabled = os.environ.get("HEARTH_MTP_ENABLE_DELETE_CLI", "").strip().lower()
+        if enabled not in {"1", "true", "yes", "on"}:
+            self._debug("_mtp_cli_delete: disabled by HEARTH_MTP_ENABLE_DELETE_CLI")
+            return False
+
+        backend = self._get_mtp_backend()
+        if backend and backend.ensure_connected():
+            # Keep the persistent in-process session stable.
+            self._debug("_mtp_cli_delete: skipped to avoid session churn")
+            return False
+
+        target = "/" + remote_path.strip().strip("/").replace("\\", "/")
+        result = self._run_command(["mtp-connect", "--delete", target], timeout=60)
+        if not result or result.returncode != 0:
+            self._debug("_mtp_cli_delete: command failed")
+            return False
+
+        output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+        failure_markers = [
+            "no devices",
+            "panic",
+            "unable to initialize device",
+            "error returned by libusb_claim_interface",
+            "ptp_error",
+            "item_id:-1",
+        ]
+        if any(marker in output for marker in failure_markers):
+            self._debug("_mtp_cli_delete: command output indicates failure")
+            return False
+
+        self._debug(f"_mtp_cli_delete: delete succeeded target='{target}'")
+        return True
 
     def _list_file_tree_from_mtp_filetree(self) -> List[Dict[str, object]]:
         """List file tree using persistent libmtp session."""

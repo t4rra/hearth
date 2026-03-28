@@ -1,6 +1,7 @@
 """Unit tests for KindleDevice write and metadata paths."""
 
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -161,6 +162,80 @@ class TestKindleWritePaths(unittest.TestCase):
                 self.assertTrue(self.device.ensure_hearth_folder_exists())
 
         self.assertTrue(hearth_dir.exists())
+
+    def test_delete_file_from_kindle_mtp_tries_both_candidate_paths(self):
+        backend = Mock()
+        backend.delete_file_by_path.side_effect = [False, True]
+
+        with patch.object(
+            self.device,
+            "_detect_mtp_kindle",
+            return_value=True,
+        ):
+            with patch.object(
+                self.device,
+                "_get_mtp_backend",
+                return_value=backend,
+            ):
+                self.assertTrue(self.device.delete_file_from_kindle("book.mobi"))
+
+        self.assertEqual(backend.delete_file_by_path.call_count, 2)
+
+    def test_delete_file_from_kindle_mtp_falls_back_to_cli_delete(self):
+        backend = Mock()
+        backend.delete_file_by_path.return_value = False
+
+        with patch.object(
+            self.device,
+            "_detect_mtp_kindle",
+            return_value=True,
+        ):
+            with patch.object(
+                self.device,
+                "_get_mtp_backend",
+                return_value=backend,
+            ):
+                with patch.object(
+                    self.device,
+                    "_mtp_cli_delete",
+                    side_effect=[False, True],
+                ) as cli_delete:
+                    self.assertTrue(self.device.delete_file_from_kindle("book.mobi"))
+
+        self.assertEqual(backend.delete_file_by_path.call_count, 2)
+        self.assertEqual(cli_delete.call_count, 2)
+
+    def test_mtp_cli_delete_disabled_by_default(self):
+        device = KindleDevice(auto_mount_mtp=False, auto_install_mtp_backend=False)
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(device, "_run_command") as run_cmd:
+                self.assertFalse(device._mtp_cli_delete("/documents/Hearth"))
+
+        run_cmd.assert_not_called()
+
+    def test_mtp_cli_delete_rejects_false_success_output(self):
+        device = KindleDevice(auto_mount_mtp=False, auto_install_mtp_backend=False)
+        result = Mock(returncode=0)
+        result.stdout = "No devices."
+        result.stderr = "LIBMTP PANIC: Unable to initialize device"
+
+        backend = Mock()
+        backend.ensure_connected.return_value = False
+
+        with patch.dict(
+            os.environ,
+            {"HEARTH_MTP_ENABLE_DELETE_CLI": "1"},
+            clear=False,
+        ):
+            with patch.object(device, "_get_mtp_backend", return_value=backend):
+                with patch.object(
+                    device,
+                    "_run_command",
+                    return_value=result,
+                ) as run_cmd:
+                    self.assertFalse(device._mtp_cli_delete("/documents/Hearth"))
+
+        run_cmd.assert_called_once()
 
     def test_save_metadata_mtp_writes_and_sends_json(self):
         metadata = {

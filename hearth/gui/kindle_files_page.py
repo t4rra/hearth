@@ -25,10 +25,19 @@ class KindleFilesPage(QWidget):
         super().__init__()
         self.settings_manager = SettingsManager()
         self._kindle_device: Optional[KindleDevice] = kindle_device
+        self._initial_refresh_done = False
         self.tree: QTreeWidget
         self.path_label: QLabel
         self.status_label: QLabel
         self.init_ui()
+        self.status_label.setText("Open this tab or click Refresh to load files")
+
+    def showEvent(self, event) -> None:
+        """Load file tree lazily when this tab is first shown."""
+        super().showEvent(event)
+        if self._initial_refresh_done:
+            return
+        self._initial_refresh_done = True
         self.refresh_files()
 
     def init_ui(self) -> None:
@@ -101,9 +110,38 @@ class KindleFilesPage(QWidget):
         self.status_label.setText("Loading file tree...")
 
         self._populate_entries(entries)
-        self.tree.expandToDepth(1)
+        self.tree.collapseAll()
+        self._expand_hearth_folder()
         top_count = self.tree.topLevelItemCount()
         self.status_label.setText(f"Loaded {top_count} top-level entries")
+
+    def _expand_hearth_folder(self) -> None:
+        """Expand Hearth folder and its parents when present in the tree."""
+        root_count = self.tree.topLevelItemCount()
+        for i in range(root_count):
+            root_item = self.tree.topLevelItem(i)
+            if root_item is None:
+                continue
+            self._expand_hearth_in_subtree(root_item)
+
+    def _expand_hearth_in_subtree(self, item: QTreeWidgetItem) -> bool:
+        """Recursively find and expand Hearth node."""
+        if item.text(0).strip().lower() == "hearth":
+            item.setExpanded(True)
+            parent = item.parent()
+            while parent is not None:
+                parent.setExpanded(True)
+                parent = parent.parent()
+            return True
+
+        for idx in range(item.childCount()):
+            child = item.child(idx)
+            if child is None:
+                continue
+            if self._expand_hearth_in_subtree(child):
+                return True
+
+        return False
 
     def _populate_entries(self, entries: list[dict]) -> None:
         """Populate tree from a list of entries with full paths."""

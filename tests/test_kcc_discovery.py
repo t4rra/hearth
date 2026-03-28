@@ -1,5 +1,7 @@
 """Test KCC command discovery prioritization."""
 
+import os
+import shutil
 import sys
 import unittest
 from unittest.mock import Mock, patch
@@ -163,7 +165,8 @@ class TestKCCCommandDiscovery(unittest.TestCase):
         """7z detection should accept a working PATH-resolved binary."""
         converter = KCCConverter()
 
-        def which_side_effect(name):
+        def which_side_effect(name, path=None):
+            _ = path
             if name == "7z":
                 return "/usr/local/bin/7z"
             return None
@@ -183,7 +186,8 @@ class TestKCCCommandDiscovery(unittest.TestCase):
         """7z detection should also support environments exposing only 7zz."""
         converter = KCCConverter()
 
-        def which_side_effect(name):
+        def which_side_effect(name, path=None):
+            _ = path
             if name == "7zz":
                 return "/opt/homebrew/bin/7zz"
             return None
@@ -198,6 +202,97 @@ class TestKCCCommandDiscovery(unittest.TestCase):
                 found = converter._find_7z_command()
 
         self.assertEqual(found, "/opt/homebrew/bin/7zz")
+
+    def test_find_7z_command_uses_augmented_path(self):
+        """Probe should resolve commands using fallback dirs in GUI PATH contexts."""
+        converter = KCCConverter()
+        observed = {}
+
+        def which_side_effect(name, path=None):
+            observed[name] = path
+            if name == "7z" and path and "/opt/homebrew/bin" in path:
+                return "/opt/homebrew/bin/7z"
+            return None
+
+        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=False):
+            with patch("shutil.which", side_effect=which_side_effect):
+                with patch("subprocess.run") as mock_run:
+                    mock_run.return_value = Mock(
+                        returncode=0,
+                        stdout="7-Zip [64] 24.09",
+                        stderr="",
+                    )
+                    found = converter._find_7z_command()
+
+        self.assertEqual(found, "/opt/homebrew/bin/7z")
+        self.assertIn("/opt/homebrew/bin", observed.get("7z", ""))
+
+    def test_find_7z_command_passes_probe_env(self):
+        """7z probe subprocess should run with augmented PATH env."""
+        converter = KCCConverter()
+
+        with patch("shutil.which", return_value="/usr/local/bin/7z"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = Mock(
+                    returncode=0,
+                    stdout="7-Zip",
+                    stderr="",
+                )
+                found = converter._find_7z_command()
+
+        self.assertEqual(found, "/usr/local/bin/7z")
+        kwargs = mock_run.call_args.kwargs
+        self.assertIn("env", kwargs)
+        self.assertIn("/opt/homebrew/bin", kwargs["env"].get("PATH", ""))
+
+    def test_find_7z_command_skips_non_executable_absolute_candidates(self):
+        """Absolute candidates should be ignored when not executable."""
+        converter = KCCConverter()
+
+        with patch("shutil.which", return_value=None):
+            with patch("pathlib.Path.exists", return_value=True):
+                with patch("pathlib.Path.is_file", return_value=True):
+                    with patch("os.access", return_value=False):
+                        with patch("subprocess.run") as mock_run:
+                            found = converter._find_7z_command()
+
+        self.assertIsNone(found)
+        mock_run.assert_not_called()
+
+    def test_build_runtime_env_adds_7zz_shim_on_macos(self):
+        """When only 7z is found, runtime env should still expose 7zz on macOS."""
+        converter = KCCConverter()
+
+        with patch("platform.system", return_value="Darwin"):
+            with patch.object(
+                converter,
+                "_find_7z_command",
+                return_value="/opt/homebrew/bin/7z",
+            ):
+                env = converter._build_runtime_env()
+
+        self.assertIn("PATH", env)
+        self.assertIsNotNone(shutil.which("7zz", path=env["PATH"]))
+
+    def test_runtime_status_checks_required_archive_tool_name(self):
+        """Runtime status should verify KCC-required tool name, not just any 7z variant."""
+        converter = KCCConverter()
+
+        with patch("platform.system", return_value="Darwin"):
+            with patch.object(
+                converter,
+                "_find_7z_command",
+                return_value="/opt/homebrew/bin/7z",
+            ):
+                with patch.object(
+                    converter,
+                    "_find_kcc_command",
+                    return_value=["/tmp/kcc-c2e"],
+                ):
+                    status = converter.get_runtime_status()
+
+        self.assertTrue(status["seven_zip_available"])
+        self.assertTrue(str(status["seven_zip_command"]).endswith("7zz"))
 
 
 if __name__ == "__main__":

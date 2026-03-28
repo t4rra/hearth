@@ -5,6 +5,9 @@ import sys
 import subprocess
 import shutil
 import importlib.util
+import platform
+import tempfile
+import shlex
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +47,32 @@ class KCCConverter(BaseConverter):
         )
         self.kcc_command: Optional[list[str]] = None
         self._install_attempted = False
+        self._seven_zip_shim_dir: Optional[Path] = None
+
+    def _kcc_archive_tool_name(self) -> str:
+        """Return the archive tool name required by the active KCC build."""
+        return "7zz" if platform.system() == "Darwin" else "7z"
+
+    def _ensure_seven_zip_shims(self, seven_zip_command: str) -> Optional[Path]:
+        """Create PATH shims so both 7z and 7zz names resolve consistently."""
+        command_path = Path(seven_zip_command)
+        if not command_path.exists():
+            return None
+
+        if self._seven_zip_shim_dir is None:
+            self._seven_zip_shim_dir = Path(tempfile.mkdtemp(prefix="hearth-kcc-7zip-"))
+
+        quoted_command = shlex.quote(str(command_path))
+        script_body = f'#!/bin/sh\nexec {quoted_command} "$@"\n'
+        for alias in ("7z", "7zz"):
+            shim_path = self._seven_zip_shim_dir / alias
+            try:
+                shim_path.write_text(script_body, encoding="utf-8")
+                shim_path.chmod(0o755)
+            except OSError:
+                return None
+
+        return self._seven_zip_shim_dir
 
     def _find_kcc_command(self, allow_bootstrap: bool = False) -> Optional[list[str]]:
         """Find Kindle Comic Converter CLI command.
@@ -232,6 +261,8 @@ class KCCConverter(BaseConverter):
         Some installs expose `7zz` instead of `7z`, and GUI-launched apps can
         miss shell PATH entries, so we also check common absolute paths.
         """
+        probe_env = self._build_base_runtime_env()
+        probe_path = probe_env.get("PATH", "")
         candidates: list[str] = [
             "7z",
             "7zz",
@@ -247,9 +278,15 @@ class KCCConverter(BaseConverter):
         resolved: list[str] = []
         for candidate in candidates:
             if "/" in candidate:
-                resolved.append(candidate)
+                candidate_path = Path(candidate)
+                if (
+                    candidate_path.exists()
+                    and candidate_path.is_file()
+                    and os.access(candidate_path, os.X_OK)
+                ):
+                    resolved.append(str(candidate_path))
                 continue
-            located = shutil.which(candidate)
+            located = shutil.which(candidate, path=probe_path)
             if located:
                 resolved.append(located)
 
@@ -270,15 +307,64 @@ class KCCConverter(BaseConverter):
                     text=True,
                     timeout=5,
                     check=False,
+                    env=probe_env,
                 )
             except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
                 continue
 
             output = ((result.stdout or "") + "\n" + (result.stderr or "")).lower()
-            if "7-zip" in output or "usage" in output or result.returncode == 0:
+            has_signature = any(
+                marker in output
+                for marker in (
+                    "7-zip",
+                    "7 zip",
+                    "p7zip",
+                    "7z ",
+                    "7zz",
+                )
+            )
+            if has_signature and result.returncode in {0, 1, 2}:
                 return command
 
         return None
+
+    def _build_base_runtime_env(self) -> dict[str, str]:
+        """Build baseline env with fallback PATH locations for GUI sessions."""
+        env = os.environ.copy()
+        path_parts = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
+
+        fallback_dirs = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ]
+        for path_dir in fallback_dirs:
+            if path_dir not in path_parts:
+                path_parts.append(path_dir)
+
+        env["PATH"] = os.pathsep.join(path_parts)
+        return env
+
+    def _build_runtime_env(self) -> dict[str, str]:
+        """Build env for KCC subprocess with robust PATH for helper tools."""
+        env = self._build_base_runtime_env()
+        path_parts = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
+
+        seven_zip_command = self._find_7z_command()
+        if seven_zip_command:
+            shim_dir = self._ensure_seven_zip_shims(seven_zip_command)
+            if shim_dir:
+                shim_dir_text = str(shim_dir)
+                if shim_dir_text not in path_parts:
+                    path_parts.insert(0, shim_dir_text)
+
+            seven_zip_dir = str(Path(seven_zip_command).parent)
+            if seven_zip_dir not in path_parts:
+                path_parts.insert(0, seven_zip_dir)
+
+        env["PATH"] = os.pathsep.join(path_parts)
+        return env
 
     def get_runtime_status(self) -> dict[str, object]:
         """Return detailed KCC readiness diagnostics for startup checks."""
@@ -289,7 +375,10 @@ class KCCConverter(BaseConverter):
         repo_exists = self.kcc_repo_dir.exists()
         script_exists = script_path.exists()
         git_available = bool(shutil.which("git"))
-        seven_zip_command = self._find_7z_command()
+        runtime_env = self._build_runtime_env()
+        runtime_path = runtime_env.get("PATH", "")
+        required_archive_tool = self._kcc_archive_tool_name()
+        seven_zip_command = shutil.which(required_archive_tool, path=runtime_path)
         seven_zip_available = bool(seven_zip_command)
         auto_fetch = os.environ.get("HEARTH_KCC_AUTO_FETCH", "1").strip().lower()
         auto_fetch_enabled = auto_fetch not in {"0", "false", "off", "no"}
@@ -327,7 +416,9 @@ class KCCConverter(BaseConverter):
                 "Missing KCC Python dependencies: " + ", ".join(missing_python_modules)
             )
         if not seven_zip_available:
-            issues.append("7z not found (needed for some comic archives)")
+            issues.append(
+                f"{required_archive_tool} not found " "(needed for some comic archives)"
+            )
 
         return {
             "ready": bool(command) and not missing_python_modules,
@@ -423,6 +514,7 @@ class KCCConverter(BaseConverter):
                 timeout=300,
                 check=False,
                 cwd=self._command_cwd(self.kcc_command),
+                env=self._build_runtime_env(),
             )
 
             # If manga flag is unsupported by an unexpected KCC variant,
@@ -444,6 +536,7 @@ class KCCConverter(BaseConverter):
                     timeout=300,
                     check=False,
                     cwd=self._command_cwd(self.kcc_command),
+                    env=self._build_runtime_env(),
                 )
 
             if result.returncode != 0:

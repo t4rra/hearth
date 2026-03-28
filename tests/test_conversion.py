@@ -161,6 +161,31 @@ class TestComicConversion(unittest.TestCase):
         self.assertNotIn("--manga", called_cmd)
         self.assertNotIn("1.0", called_cmd)
 
+    def test_kcc_convert_env_includes_7z_path(self):
+        """KCC subprocess env should include detected 7z directory in PATH."""
+        cbz_path = self.create_mock_cbz()
+        output_path = self.output_dir / f"{cbz_path.stem}.mobi"
+        output_path.write_text("mock mobi", encoding="utf-8")
+
+        converter = KCCConverter(output_dir=self.output_dir)
+        converter.kcc_command = [sys.executable, "/tmp/kcc-c2e.py"]
+
+        with patch.object(
+            converter, "_find_7z_command", return_value="/opt/homebrew/bin/7z"
+        ):
+            with patch("hearth.converters.kcc.subprocess.run") as mock_run:
+                mock_run.return_value = Mock(returncode=0, stdout="ok", stderr="")
+                result = converter.convert(
+                    cbz_path, output_format=ConversionFormat.MOBI
+                )
+
+        self.assertTrue(result.success)
+        env = mock_run.call_args.kwargs.get("env")
+        self.assertIsNotNone(env)
+        assert env is not None
+        self.assertIn("PATH", env)
+        self.assertIn("/opt/homebrew/bin", env["PATH"])
+
 
 class TestEbookConversion(unittest.TestCase):
     """Test ebook conversion functionality."""
