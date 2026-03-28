@@ -47,9 +47,7 @@ def main(argv: list[str] | None = None) -> int:
 
     feed_url = args.feed_url or settings.opds_url
     if not feed_url:
-        parser.error(
-            "feed URL is required via --feed-url or settings.opds_url"
-        )
+        parser.error("feed URL is required via --feed-url or settings.opds_url")
 
     session = OPDSSession(settings)
     client = OPDSClient(session)

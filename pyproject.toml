@@ -8,13 +8,12 @@ version = "0.1.0"
 description = "OPDS-to-Kindle sync tool"
 readme = "OVERVIEW.md"
 requires-python = ">=3.11"
-authors = [
-  {name = "Hearth"}
-]
-dependencies = []
+authors = [{ name = "Hearth" }]
+dependencies = ["PyQt6>=6.7"]
 
 [project.scripts]
 hearth = "hearth.cli:main"
+hearth-gui = "hearth.gui.app:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

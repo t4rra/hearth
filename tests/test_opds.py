@@ -78,6 +78,4 @@ def test_guess_series_from_title() -> None:
 def test_auth_configuration_is_session_wide() -> None:
     settings = Settings(auth_mode="bearer", auth_bearer_token="abc")
     session = OPDSSession(settings)
-    assert session.settings.auth_headers() == {
-        "Authorization": "Bearer abc"
-    }
+    assert session.settings.auth_headers() == {"Authorization": "Bearer abc"}

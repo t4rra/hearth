@@ -23,9 +23,7 @@ def _looks_like_comic_archive(path: Path) -> bool:
             image_files = [
                 n
                 for n in archive.namelist()
-                if n.lower().endswith(
-                    (".jpg", ".jpeg", ".png", ".webp")
-                )
+                if n.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
             ]
             return len(image_files) > 0
     except zipfile.BadZipFile:

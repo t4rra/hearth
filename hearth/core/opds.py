@@ -24,10 +24,7 @@ class OPDSLink:
         return "navigation" in self.rel or "atom+xml" in self.type
 
     def is_acquisition(self) -> bool:
-        return (
-            "acquisition" in self.rel
-            or self.type.startswith("application/epub")
-        )
+        return "acquisition" in self.rel or self.type.startswith("application/epub")
 
 
 @dataclass(slots=True)
@@ -80,12 +77,10 @@ class OPDSClient:
         entries: list[OPDSEntry] = []
         for entry in root.findall("atom:entry", NS):
             title = (
-                entry.findtext("atom:title", default="", namespaces=NS)
-                or ""
+                entry.findtext("atom:title", default="", namespaces=NS) or ""
             ).strip()
             entry_id = (
-                entry.findtext("atom:id", default=title, namespaces=NS)
-                or title
+                entry.findtext("atom:id", default=title, namespaces=NS) or title
             ).strip()
             author = (
                 entry.findtext(
@@ -137,9 +132,7 @@ class OPDSClient:
             for entry in self.fetch_entries(current):
                 for link in entry.links:
                     if link.is_acquisition() and link.href:
-                        acquisitions.append(
-                            (entry, self._resolve(current, link))
-                        )
+                        acquisitions.append((entry, self._resolve(current, link)))
                     elif link.is_navigation() and link.href:
                         candidate = self._resolve_url(current, link.href)
                         if candidate not in visited:

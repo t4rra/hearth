@@ -44,9 +44,7 @@ class FakeConverters:
 def test_sync_is_idempotent(tmp_path: Path, sample_epub_path: Path) -> None:
     device = KindleDevice("usb", tmp_path / "device")
     manager = SyncManager(
-        session=FakeSession(
-            {"https://example.test/book.epub": sample_epub_path}
-        ),
+        session=FakeSession({"https://example.test/book.epub": sample_epub_path}),
         converters=FakeConverters(),
         device=device,
         workspace=tmp_path / "workspace",
@@ -73,9 +71,7 @@ def test_stale_state_is_reconciled(
 ) -> None:
     device = KindleDevice("usb", tmp_path / "device")
     manager = SyncManager(
-        session=FakeSession(
-            {"https://example.test/book.epub": sample_epub_path}
-        ),
+        session=FakeSession({"https://example.test/book.epub": sample_epub_path}),
         converters=FakeConverters(),
         device=device,
         workspace=tmp_path / "workspace",

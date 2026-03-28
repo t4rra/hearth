@@ -1,0 +1,3 @@
+[console_scripts]
+hearth = hearth.cli:main
+hearth-gui = hearth.gui.app:main

@@ -16,7 +16,4 @@ def test_infer_extension_for_real_epub(sample_epub_path: Path) -> None:
 def test_declared_type_wins_when_present(tmp_path: Path) -> None:
     payload = tmp_path / "book.bin"
     payload.write_bytes(b"nonsense")
-    assert (
-        infer_extension(payload, declared_type="application/epub+zip")
-        == ".epub"
-    )
+    assert infer_extension(payload, declared_type="application/epub+zip") == ".epub"

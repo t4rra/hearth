@@ -3,10 +3,12 @@
 Hearth is a desktop-oriented Python project for syncing books from an OPDS catalog to a Kindle.
 
 This repository currently includes:
+
 - Core OPDS session/client logic
 - Conversion routing abstractions (KCC and Calibre backends)
 - Kindle transport and sync state management
 - A CLI entrypoint
+- A PyQt desktop GUI (`hearth-gui`)
 - A pytest test suite (including fixture-driven tests using `TESTING FILES`)
 
 ## Prerequisites
@@ -15,6 +17,7 @@ This repository currently includes:
 - macOS (primary target from current project mandate)
 
 Optional runtime tools (not required for current placeholder conversion logic):
+
 - Kindle Comic Converter CLI
 - Calibre (`ebook-convert`)
 
@@ -74,6 +77,22 @@ Force re-sync of already tracked items:
 ```bash
 hearth --feed-url "https://your-opds-server.example/opds" --force
 ```
+
+## Run the GUI
+
+Launch the desktop interface:
+
+```bash
+hearth-gui
+```
+
+GUI flow:
+
+- Load settings (or edit fields directly)
+- Click "Load Library" to pull OPDS acquisitions
+- Select rows to sync
+- Click "Sync Selected"
+- Watch logs/status in the bottom panel
 
 ## Run Tests
 

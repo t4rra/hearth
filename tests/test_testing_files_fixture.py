@@ -8,9 +8,7 @@ from hearth.converters.detection import infer_extension
 def test_testing_files_have_expected_extensions(
     testing_files_dir: Path,
 ) -> None:
-    names = sorted(
-        path.name for path in testing_files_dir.iterdir() if path.is_file()
-    )
+    names = sorted(path.name for path in testing_files_dir.iterdir() if path.is_file())
     assert any(name.endswith(".cbz") for name in names)
     assert any(name.endswith(".epub") for name in names)
 
