@@ -322,24 +322,16 @@ class HearthMainWindow(QMainWindow):
 
     def _connect_events(self) -> None:
         self.probe_kindle_button.clicked.connect(self._probe_kindle)
-        self.auth_mode_combo.currentTextChanged.connect(
-            self._update_auth_visibility
-        )
+        self.auth_mode_combo.currentTextChanged.connect(self._update_auth_visibility)
 
         self.load_catalog_button.clicked.connect(self._load_root_collections)
         self.sync_selected_button.clicked.connect(self._sync_selected)
-        self.select_all_library_button.clicked.connect(
-            self._select_all_library_rows
-        )
+        self.select_all_library_button.clicked.connect(self._select_all_library_rows)
         self.clear_library_selection_button.clicked.connect(
             self._clear_library_selection
         )
-        self.collections_tree.currentItemChanged.connect(
-            self._on_collection_changed
-        )
-        self.collections_tree.itemExpanded.connect(
-            self._on_collection_expanded
-        )
+        self.collections_tree.currentItemChanged.connect(self._on_collection_changed)
+        self.collections_tree.itemExpanded.connect(self._on_collection_expanded)
 
         self.refresh_files_button.clicked.connect(self._refresh_kindle_files)
         self.download_selected_file_button.clicked.connect(
@@ -567,18 +559,12 @@ class HearthMainWindow(QMainWindow):
             if current is not None:
                 current_feed = current.data(0, Qt.ItemDataRole.UserRole)
                 if current_feed == feed_url:
-                    self._populate_library_table(
-                        self.books_by_feed.get(feed_url, [])
-                    )
+                    self._populate_library_table(self.books_by_feed.get(feed_url, []))
             return
 
         settings = self._current_settings()
         if not self.is_busy:
-            status = (
-                "Loading root collections..."
-                if is_root
-                else "Loading shelf..."
-            )
+            status = "Loading root collections..." if is_root else "Loading shelf..."
             self._set_busy(status)
 
         self.loading_feeds.add(feed_url)
@@ -659,9 +645,7 @@ class HearthMainWindow(QMainWindow):
 
         if result.is_root:
             self._populate_root_collections(result.children)
-            self._log(
-                f"Loaded {len(result.children)} top-level collections"
-            )
+            self._log(f"Loaded {len(result.children)} top-level collections")
             return
 
         parent_item = self.tree_item_by_feed.get(result.feed_url)
@@ -692,9 +676,7 @@ class HearthMainWindow(QMainWindow):
 
         self.collections_tree.collapseAll()
         if self.collections_tree.topLevelItemCount() > 0:
-            self.collections_tree.setCurrentItem(
-                self.collections_tree.topLevelItem(0)
-            )
+            self.collections_tree.setCurrentItem(self.collections_tree.topLevelItem(0))
 
     def _attach_placeholder(self, item: QTreeWidgetItem) -> None:
         if item.childCount() > 0:

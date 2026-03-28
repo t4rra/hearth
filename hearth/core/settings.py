@@ -29,11 +29,7 @@ class Settings:
             return cls()
         payload = json.loads(path.read_text(encoding="utf-8"))
         allowed = {item.name for item in fields(cls)}
-        filtered = {
-            key: value
-            for key, value in payload.items()
-            if key in allowed
-        }
+        filtered = {key: value for key, value in payload.items() if key in allowed}
         return cls(**filtered)
 
     def save(self, path: Path) -> None:
