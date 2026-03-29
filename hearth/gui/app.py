@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from typing import Any, Callable, Literal, cast
 import urllib.parse
 
 from PyQt6.QtCore import QTimer, Qt  # type: ignore[import-not-found]
+from PyQt6.QtGui import QColor  # type: ignore[import-not-found]
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -109,6 +111,13 @@ class HearthMainWindow(QMainWindow):
         self.loaded_feeds: set[str] = set()
         self.loading_feeds: set[str] = set()
         self.tree_item_by_feed: dict[str, QTreeWidgetItem] = {}
+        self.book_rows_by_id: dict[str, LibraryRow] = {}
+        self.book_on_device: dict[str, bool] = {}
+        self.pending_book_actions: dict[str, Literal["add", "remove"]] = {}
+        self.collection_sync_feeds: set[str] = set()
+        self.pending_collection_targets: dict[str, bool] = {}
+        self._updating_library_checks = False
+        self._updating_collection_checks = False
 
         self.workspace_input = QLineEdit(str(Path.home() / ".hearth"))
         self.download_dir_input = QLineEdit(str(Path.home() / "Downloads"))
@@ -384,6 +393,8 @@ class HearthMainWindow(QMainWindow):
         )
         self.collections_tree.currentItemChanged.connect(self._on_collection_changed)
         self.collections_tree.itemExpanded.connect(self._on_collection_expanded)
+        self.collections_tree.itemChanged.connect(self._on_collection_item_changed)
+        self.library_table.itemChanged.connect(self._on_library_item_changed)
 
         self.refresh_files_button.clicked.connect(self._refresh_kindle_files)
         self.download_selected_file_button.clicked.connect(
@@ -453,7 +464,39 @@ class HearthMainWindow(QMainWindow):
         self.calibre_command_input.setText(settings.calibre_command)
 
         self._update_auth_visibility()
+        self._load_collection_sync_preferences()
         self._log(f"Loaded settings from {self.settings_path}")
+
+    def _collection_sync_path(self) -> Path:
+        workspace = Path(self.workspace_input.text().strip() or ".hearth")
+        return workspace / ".hearth_collection_sync.json"
+
+    def _load_collection_sync_preferences(self) -> None:
+        path = self._collection_sync_path()
+        if not path.exists():
+            self.collection_sync_feeds = set()
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self.collection_sync_feeds = set()
+            return
+
+        feeds = payload.get("feeds", [])
+        if isinstance(feeds, list):
+            self.collection_sync_feeds = {
+                item for item in feeds if isinstance(item, str) and item.strip()
+            }
+        else:
+            self.collection_sync_feeds = set()
+
+    def _save_collection_sync_preferences(self) -> None:
+        path = self._collection_sync_path()
+        payload = {
+            "feeds": sorted(self.collection_sync_feeds),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _save_settings_to_file(self) -> None:
         settings = self._current_settings()
@@ -494,6 +537,7 @@ class HearthMainWindow(QMainWindow):
         self.workspace_input.setText(str(Path.home() / ".hearth"))
         self.download_dir_input.setText(str(Path.home() / "Downloads"))
         self._save_settings_to_file()
+        self._load_collection_sync_preferences()
 
     def _reset_opds(self) -> None:
         self.feed_input.setText("")
@@ -639,6 +683,10 @@ class HearthMainWindow(QMainWindow):
         self.loaded_feeds = set()
         self.loading_feeds = set()
         self.tree_item_by_feed = {}
+        self.book_rows_by_id = {}
+        self.book_on_device = {}
+        self.pending_book_actions = {}
+        self.pending_collection_targets = {}
         self.collections_tree.clear()
         self.library_table.setRowCount(0)
 
@@ -745,9 +793,24 @@ class HearthMainWindow(QMainWindow):
         self.loading_feeds.discard(result.feed_url)
         self.loaded_feeds.add(result.feed_url)
         self.books_by_feed[result.feed_url] = result.books
+        for row in result.books:
+            self.book_rows_by_id[row.id] = row
+        self._refresh_book_presence_cache()
+
+        pending_target = self.pending_collection_targets.pop(
+            result.feed_url,
+            None,
+        )
+        if pending_target is not None:
+            self._apply_collection_target(result.feed_url, pending_target)
+
+        if result.feed_url in self.collection_sync_feeds:
+            self._plan_collection_missing_books(result.feed_url)
 
         if result.is_root:
             self._populate_root_collections(result.children)
+            self._queue_collection_autoloads()
+            self._refresh_all_collection_states()
             self._log(f"Loaded {len(result.children)} top-level collections")
             return
 
@@ -764,22 +827,46 @@ class HearthMainWindow(QMainWindow):
             if current_feed == result.feed_url:
                 self._populate_library_table(result.books)
 
+        self._refresh_all_collection_states()
         self._log(f"Loaded {len(result.children)} sub-collections")
+
+    def _queue_collection_autoloads(self) -> None:
+        for feed_url in sorted(self.collection_sync_feeds):
+            if feed_url in self.loaded_feeds:
+                continue
+            self._request_feed_load(
+                feed_url=feed_url,
+                is_root=False,
+                show_errors=False,
+            )
 
     def _populate_root_collections(self, rows: list[CollectionRow]) -> None:
         self.collections_tree.clear()
         self.tree_item_by_feed = {}
 
+        self._updating_collection_checks = True
         for row in rows:
-            item = QTreeWidgetItem([row.title])
-            item.setData(0, Qt.ItemDataRole.UserRole, row.feed_url)
+            item = self._build_collection_item(row)
             self._attach_placeholder(item)
             self.collections_tree.addTopLevelItem(item)
             self.tree_item_by_feed[row.feed_url] = item
+        self._updating_collection_checks = False
 
         self.collections_tree.collapseAll()
         if self.collections_tree.topLevelItemCount() > 0:
             self.collections_tree.setCurrentItem(self.collections_tree.topLevelItem(0))
+
+    def _build_collection_item(self, row: CollectionRow) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([row.title])
+        item.setData(0, Qt.ItemDataRole.UserRole, row.feed_url)
+        item.setFlags(
+            item.flags()
+            | Qt.ItemFlag.ItemIsUserCheckable
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsEnabled
+        )
+        item.setCheckState(0, Qt.CheckState.Unchecked)
+        return item
 
     def _attach_placeholder(self, item: QTreeWidgetItem) -> None:
         if item.childCount() > 0:
@@ -794,12 +881,13 @@ class HearthMainWindow(QMainWindow):
         rows: list[CollectionRow],
     ) -> None:
         parent_item.takeChildren()
+        self._updating_collection_checks = True
         for row in rows:
-            child_item = QTreeWidgetItem([row.title])
-            child_item.setData(0, Qt.ItemDataRole.UserRole, row.feed_url)
+            child_item = self._build_collection_item(row)
             self._attach_placeholder(child_item)
             parent_item.addChild(child_item)
             self.tree_item_by_feed[row.feed_url] = child_item
+        self._updating_collection_checks = False
 
     def _on_collection_expanded(self, item: QTreeWidgetItem) -> None:
         feed_url = item.data(0, Qt.ItemDataRole.UserRole)
@@ -837,34 +925,9 @@ class HearthMainWindow(QMainWindow):
         )
 
     def _populate_library_table(self, rows: list[LibraryRow]) -> None:
-        records = {}
-        device_files: set[str] = set()
-        if self.connected_device is not None:
-            device = KindleDevice(
-                transport=self.connected_device.transport,
-                root=self.connected_device.root,
-            )
-            if device.transport == "mtp":
-                metadata_path = (
-                    Path(self.workspace_input.text().strip() or ".hearth")
-                    / ".hearth_metadata.mtp.json"
-                )
-            else:
-                metadata_path = device.documents_dir / ".hearth_metadata.json"
-            records = load_metadata(metadata_path)
-            device_files = set()
-            for entry in device.list_files():
-                if entry.is_dir:
-                    continue
-                device_files.add(entry.name)
-                device_files.add(entry.path)
-                normalized = entry.path.strip("/")
-                if normalized:
-                    device_files.add(normalized)
-                    if normalized.startswith("documents/"):
-                        relative = normalized.removeprefix("documents/")
-                        device_files.add(relative)
+        self._refresh_book_presence_cache()
 
+        self._updating_library_checks = True
         self.library_table.setRowCount(len(rows))
         for idx, row in enumerate(rows):
             check_item = QTableWidgetItem("")
@@ -882,16 +945,17 @@ class HearthMainWindow(QMainWindow):
                     "author": row.author,
                     "download_url": row.download_url,
                     "declared_type": row.declared_type,
+                    "base_on_device": self.book_on_device.get(row.id, False),
                 },
             )
 
-            status = "Not Synced"
-            if row.id in records:
-                record = records[row.id]
-                if record.device_filename in device_files and record.on_device:
-                    status = "On Device"
-                elif record.desired:
-                    status = "Wanted"
+            status_item = QTableWidgetItem("")
+            self._apply_book_visual_state(
+                check_item,
+                status_item,
+                book_id=row.id,
+                base_on_device=self.book_on_device.get(row.id, False),
+            )
 
             self.library_table.setItem(idx, 0, check_item)
             self.library_table.setItem(idx, 1, QTableWidgetItem(row.title))
@@ -905,43 +969,305 @@ class HearthMainWindow(QMainWindow):
                 3,
                 QTableWidgetItem(row.declared_type or ""),
             )
-            self.library_table.setItem(idx, 4, QTableWidgetItem(status))
+            self.library_table.setItem(idx, 4, status_item)
+        self._updating_library_checks = False
+        self._refresh_all_collection_states()
+
+    def _refresh_book_presence_cache(self) -> None:
+        self.book_on_device = {}
+        if self.connected_device is None:
+            return
+
+        all_rows = [row for rows in self.books_by_feed.values() for row in rows]
+        if not all_rows:
+            return
+
+        device = KindleDevice(
+            transport=self.connected_device.transport,
+            root=self.connected_device.root,
+        )
+        if device.transport == "mtp":
+            metadata_path = (
+                Path(self.workspace_input.text().strip() or ".hearth")
+                / ".hearth_metadata.mtp.json"
+            )
+        else:
+            metadata_path = device.documents_dir / ".hearth_metadata.json"
+
+        records = load_metadata(metadata_path)
+        device_files: set[str] = set()
+        for entry in device.list_files():
+            if entry.is_dir:
+                continue
+            device_files.add(entry.name)
+            device_files.add(entry.path)
+            normalized = entry.path.strip("/")
+            if normalized:
+                device_files.add(normalized)
+                if normalized.startswith("documents/"):
+                    relative = normalized.removeprefix("documents/")
+                    device_files.add(relative)
+
+        for row in all_rows:
+            record = records.get(row.id)
+            if not record:
+                self.book_on_device[row.id] = False
+                continue
+            self.book_on_device[row.id] = (
+                record.on_device and record.device_filename in device_files
+            )
+
+    def _apply_book_visual_state(
+        self,
+        check_item: QTableWidgetItem,
+        status_item: QTableWidgetItem,
+        book_id: str,
+        base_on_device: bool,
+    ) -> None:
+        action = self.pending_book_actions.get(book_id)
+        if action == "add":
+            check_item.setCheckState(Qt.CheckState.PartiallyChecked)
+            status_item.setText("Will Add")
+            status_item.setForeground(QColor("#198754"))
+            return
+        if action == "remove":
+            check_item.setCheckState(Qt.CheckState.PartiallyChecked)
+            status_item.setText("Will Remove")
+            status_item.setForeground(QColor("#b02a37"))
+            return
+
+        if base_on_device:
+            check_item.setCheckState(Qt.CheckState.Checked)
+            status_item.setText("On Kindle")
+        else:
+            check_item.setCheckState(Qt.CheckState.Unchecked)
+            status_item.setText("Not On Kindle")
+        status_item.setForeground(QColor("#000000"))
+
+    def _on_library_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._updating_library_checks:
+            return
+        if item.column() != 0:
+            return
+
+        payload = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(payload, dict):
+            return
+
+        book_id = payload.get("id")
+        if not isinstance(book_id, str):
+            return
+        base_on_device = bool(payload.get("base_on_device", False))
+        existing = self.pending_book_actions.get(book_id)
+
+        if existing is not None:
+            del self.pending_book_actions[book_id]
+        elif base_on_device:
+            self.pending_book_actions[book_id] = "remove"
+        else:
+            self.pending_book_actions[book_id] = "add"
+
+        row_idx = item.row()
+        status_item = self.library_table.item(row_idx, 4)
+        if status_item is None:
+            status_item = QTableWidgetItem("")
+            self.library_table.setItem(row_idx, 4, status_item)
+
+        self._updating_library_checks = True
+        self._apply_book_visual_state(item, status_item, book_id, base_on_device)
+        self._updating_library_checks = False
+        self._refresh_all_collection_states()
 
     def _select_all_library_rows(self) -> None:
         for row in range(self.library_table.rowCount()):
             item = self.library_table.item(row, 0)
             if item is None:
                 continue
-            item.setCheckState(Qt.CheckState.Checked)
+            payload = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(payload, dict):
+                continue
+            book_id = payload.get("id")
+            if not isinstance(book_id, str):
+                continue
+            base_on_device = bool(payload.get("base_on_device", False))
+            if base_on_device:
+                self.pending_book_actions.pop(book_id, None)
+            else:
+                self.pending_book_actions[book_id] = "add"
+
+        self._refresh_visible_library_rows()
+        self._refresh_all_collection_states()
 
     def _clear_library_selection(self) -> None:
         for row in range(self.library_table.rowCount()):
             item = self.library_table.item(row, 0)
             if item is None:
                 continue
-            item.setCheckState(Qt.CheckState.Unchecked)
-
-    def _selected_sync_items(self) -> list[SyncItem]:
-        selected: list[SyncItem] = []
-        for row in range(self.library_table.rowCount()):
-            check_item = self.library_table.item(row, 0)
-            if check_item is None:
+            payload = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(payload, dict):
                 continue
-            if check_item.checkState() != Qt.CheckState.Checked:
+            book_id = payload.get("id")
+            if isinstance(book_id, str):
+                self.pending_book_actions.pop(book_id, None)
+
+        self._refresh_visible_library_rows()
+        self._refresh_all_collection_states()
+
+    def _refresh_visible_library_rows(self) -> None:
+        self._updating_library_checks = True
+        for row_idx in range(self.library_table.rowCount()):
+            check_item = self.library_table.item(row_idx, 0)
+            if check_item is None:
                 continue
             payload = check_item.data(Qt.ItemDataRole.UserRole)
             if not isinstance(payload, dict):
                 continue
-            selected.append(
+            book_id = payload.get("id")
+            if not isinstance(book_id, str):
+                continue
+            base_on_device = bool(payload.get("base_on_device", False))
+            status_item = self.library_table.item(row_idx, 4)
+            if status_item is None:
+                status_item = QTableWidgetItem("")
+                self.library_table.setItem(row_idx, 4, status_item)
+            self._apply_book_visual_state(
+                check_item,
+                status_item,
+                book_id=book_id,
+                base_on_device=base_on_device,
+            )
+        self._updating_library_checks = False
+
+    def _on_collection_item_changed(
+        self,
+        item: QTreeWidgetItem,
+        column: int,
+    ) -> None:
+        if self._updating_collection_checks:
+            return
+        if column != 0:
+            return
+        feed_url = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(feed_url, str):
+            return
+
+        state = item.checkState(0)
+        target_present = state == Qt.CheckState.Checked
+        self._apply_collection_target(feed_url, target_present)
+
+    def _plan_collection_missing_books(self, feed_url: str) -> None:
+        rows = self.books_by_feed.get(feed_url, [])
+        for row in rows:
+            current_action = self.pending_book_actions.get(row.id)
+            if current_action == "remove":
+                del self.pending_book_actions[row.id]
+            if not self.book_on_device.get(row.id, False):
+                self.pending_book_actions[row.id] = "add"
+
+    def _apply_collection_target(
+        self,
+        feed_url: str,
+        target_present: bool,
+    ) -> None:
+        if target_present:
+            self.collection_sync_feeds.add(feed_url)
+        else:
+            self.collection_sync_feeds.discard(feed_url)
+
+        rows = self.books_by_feed.get(feed_url)
+        if rows is None:
+            self.pending_collection_targets[feed_url] = target_present
+            self._request_feed_load(
+                feed_url=feed_url,
+                is_root=False,
+                show_errors=False,
+            )
+            self._save_collection_sync_preferences()
+            self._refresh_all_collection_states()
+            return
+
+        for row in rows:
+            on_device = self.book_on_device.get(row.id, False)
+            action = self.pending_book_actions.get(row.id)
+
+            if target_present:
+                if action == "remove":
+                    del self.pending_book_actions[row.id]
+                if not on_device:
+                    self.pending_book_actions[row.id] = "add"
+            else:
+                if action == "add":
+                    del self.pending_book_actions[row.id]
+                if on_device:
+                    self.pending_book_actions[row.id] = "remove"
+
+        self._save_collection_sync_preferences()
+        self._refresh_visible_library_rows()
+        self._refresh_all_collection_states()
+
+    def _refresh_all_collection_states(self) -> None:
+        self._updating_collection_checks = True
+        for feed_url, item in self.tree_item_by_feed.items():
+            rows = self.books_by_feed.get(feed_url)
+            if rows is None:
+                if feed_url in self.collection_sync_feeds:
+                    item.setCheckState(0, Qt.CheckState.PartiallyChecked)
+                    item.setForeground(0, QColor("#198754"))
+                else:
+                    item.setCheckState(0, Qt.CheckState.Unchecked)
+                    item.setForeground(0, QColor("#000000"))
+                continue
+
+            total = len(rows)
+            on_device = sum(1 for row in rows if self.book_on_device.get(row.id, False))
+            adds = sum(
+                1 for row in rows if self.pending_book_actions.get(row.id) == "add"
+            )
+            removes = sum(
+                1 for row in rows if self.pending_book_actions.get(row.id) == "remove"
+            )
+
+            if adds or removes:
+                state = Qt.CheckState.PartiallyChecked
+            elif total > 0 and on_device == total:
+                state = Qt.CheckState.Checked
+            elif on_device == 0:
+                state = Qt.CheckState.Unchecked
+            else:
+                state = Qt.CheckState.PartiallyChecked
+
+            item.setCheckState(0, state)
+            if adds and not removes:
+                item.setForeground(0, QColor("#198754"))
+            elif removes and not adds:
+                item.setForeground(0, QColor("#b02a37"))
+            elif adds or removes:
+                item.setForeground(0, QColor("#b26a00"))
+            else:
+                item.setForeground(0, QColor("#000000"))
+        self._updating_collection_checks = False
+
+    def _planned_sync_actions(self) -> tuple[list[SyncItem], list[str]]:
+        to_add: list[SyncItem] = []
+        to_remove: list[str] = []
+        for book_id, action in self.pending_book_actions.items():
+            if action == "remove":
+                to_remove.append(book_id)
+                continue
+
+            row = self.book_rows_by_id.get(book_id)
+            if row is None:
+                continue
+            to_add.append(
                 SyncItem(
-                    id=payload["id"],
-                    title=payload["title"],
-                    author=payload.get("author", ""),
-                    download_url=payload["download_url"],
-                    declared_type=payload["declared_type"],
+                    id=row.id,
+                    title=row.title,
+                    author=row.author,
+                    download_url=row.download_url,
+                    declared_type=row.declared_type,
                 )
             )
-        return selected
+        return to_add, to_remove
 
     def _sync_selected(self) -> None:
         if self.is_busy:
@@ -955,12 +1281,12 @@ class HearthMainWindow(QMainWindow):
             )
             return
 
-        items = self._selected_sync_items()
-        if not items:
+        items, delete_ids = self._planned_sync_actions()
+        if not items and not delete_ids:
             QMessageBox.information(
                 self,
-                "No Selection",
-                "Select one or more titles in Library.",
+                "No pending changes",
+                "Plan one or more adds/removals in Library first.",
             )
             return
 
@@ -968,11 +1294,12 @@ class HearthMainWindow(QMainWindow):
         workspace = Path(self.workspace_input.text().strip() or ".hearth")
         root = self.connected_device.root
         force_resync = self.force_checkbox.isChecked()
+        total_ops = len(items) + len(delete_ids)
 
         self.sync_progress_queue = SimpleQueue()
         self._set_busy(
-            f"Syncing {len(items)} items",
-            determinate_total=len(items),
+            f"Syncing {total_ops} change(s)",
+            determinate_total=total_ops,
         )
         future = self.worker_pool.submit(
             self._run_sync_worker,
@@ -980,6 +1307,7 @@ class HearthMainWindow(QMainWindow):
             workspace,
             str(root),
             items,
+            delete_ids,
             force_resync,
         )
         self.pending_tasks.append(
@@ -996,8 +1324,9 @@ class HearthMainWindow(QMainWindow):
         workspace: Path,
         kindle_root: str,
         items: list[SyncItem],
+        delete_ids: list[str],
         force_resync: bool,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         session = OPDSSession(settings)
         converters = ConverterManager.from_commands(
             settings.kcc_command,
@@ -1018,25 +1347,87 @@ class HearthMainWindow(QMainWindow):
             workspace=workspace,
         )
 
+        total_ops = len(items) + len(delete_ids)
+        deleted = 0
+        removed_done = 0
+
+        def emit_direct(
+            current: float,
+            message: str,
+            is_log: bool = False,
+        ) -> None:
+            if self.sync_progress_queue is None:
+                return
+            self.sync_progress_queue.put(
+                SyncProgress(
+                    current=current,
+                    total=max(1, total_ops),
+                    message=message,
+                    is_log=is_log,
+                )
+            )
+
+        for index, record_id in enumerate(delete_ids, start=1):
+            emit_direct(
+                removed_done,
+                f"[{index}/{total_ops}] removing: {record_id}",
+                is_log=True,
+            )
+            if manager.mark_deleted_on_device(record_id):
+                deleted += 1
+                emit_direct(
+                    removed_done,
+                    f"removed from device: {record_id}",
+                    is_log=True,
+                )
+            else:
+                emit_direct(
+                    removed_done,
+                    f"remove skipped (not found): {record_id}",
+                    is_log=True,
+                )
+            removed_done += 1
+
         def on_progress(event: SyncProgress) -> None:
             if self.sync_progress_queue is not None:
-                self.sync_progress_queue.put(event)
+                self.sync_progress_queue.put(
+                    SyncProgress(
+                        current=removed_done + event.current,
+                        total=max(1, total_ops),
+                        message=event.message,
+                        is_log=event.is_log,
+                    )
+                )
 
-        outcome = manager.sync(
-            items=items,
-            force_resync=force_resync,
-            progress_callback=on_progress,
-        )
-        return (outcome.synced, outcome.skipped)
+        if items:
+            outcome = manager.sync(
+                items=items,
+                force_resync=force_resync,
+                progress_callback=on_progress,
+            )
+            return (outcome.synced, outcome.skipped, deleted)
+
+        return (0, 0, deleted)
 
     def _on_sync_finished(self, result: object) -> None:
-        if not isinstance(result, tuple) or len(result) != 2:
+        if not isinstance(result, tuple) or len(result) != 3:
             raise TypeError("Unexpected sync result")
 
-        synced, skipped = result
-        self._log(f"Sync complete: synced={synced}, skipped={skipped}")
+        synced, skipped, deleted = result
+        self._log(
+            f"Sync complete: synced={synced}, skipped={skipped}, deleted={deleted}"
+        )
+        self.pending_book_actions = {}
         self.sync_progress_queue = None
         self._refresh_kindle_files(force=True)
+        self._refresh_book_presence_cache()
+
+        current_item = self.collections_tree.currentItem()
+        if current_item is not None:
+            feed_url = current_item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(feed_url, str):
+                self._populate_library_table(self.books_by_feed.get(feed_url, []))
+        self._refresh_all_collection_states()
 
     def _refresh_kindle_files(self, force: bool = False) -> None:
         if self.is_busy and not force:
