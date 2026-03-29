@@ -36,12 +36,12 @@ class ConverterManager:
         destination_dir.mkdir(parents=True, exist_ok=True)
 
         if ext in {".cbz", ".cbr"}:
-            output = destination_dir / f"{stem}.epub"
+            output = destination_dir / f"{stem}.mobi"
             converted = self.kcc.convert(source, output)
             return ConversionResult(backend=self.kcc.name, output=converted)
 
         if ext in {".epub", ".zip", ".pdf"}:
-            output = destination_dir / f"{stem}.epub"
+            output = destination_dir / f"{stem}.mobi"
             converted = self.calibre.convert(source, output)
             return ConversionResult(
                 backend=self.calibre.name,

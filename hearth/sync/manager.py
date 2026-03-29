@@ -72,6 +72,12 @@ class SyncManager:
         for entry in listed_files:
             on_device_names.add(entry.path)
             on_device_names.add(entry.name)
+            normalized = entry.path.strip("/")
+            if normalized:
+                on_device_names.add(normalized)
+                if normalized.startswith("documents/"):
+                    relative = normalized.removeprefix("documents/")
+                    on_device_names.add(relative)
         records = reconcile_on_device(
             records,
             on_device_names,
@@ -103,7 +109,7 @@ class SyncManager:
                 stem=stem,
                 declared_type=item.declared_type,
             )
-            remote_name = converted.output.name
+            remote_name = f"Hearth/{converted.output.name}"
             self.device.put_file(converted.output, remote_name)
 
             upsert_record(

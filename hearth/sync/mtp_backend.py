@@ -139,6 +139,7 @@ class LibmtpCLIBackend:
         if local_path.name != remote_name:
             temp_dir = tempfile.TemporaryDirectory(prefix="hearth-mtp-upload-")
             payload_path = Path(temp_dir.name) / remote_name
+            payload_path.parent.mkdir(parents=True, exist_ok=True)
             payload_path.write_bytes(local_path.read_bytes())
 
         try:

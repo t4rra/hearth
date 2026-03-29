@@ -84,7 +84,7 @@ def test_stale_state_is_reconciled(
     )
 
     manager.sync([item])
-    remote_path = device.documents_dir / "Book One.epub"
+    remote_path = device.documents_dir / "Hearth" / "Book One.epub"
     assert remote_path.exists()
     remote_path.unlink()
 

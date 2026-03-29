@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -140,6 +141,10 @@ class HearthMainWindow(QMainWindow):
 
         self.status_label = QLabel("Idle")
         self.kindle_status_label = QLabel("Kindle: probing...")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 1)
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setTextVisible(False)
 
         self.collections_tree = QTreeWidget()
         self.collections_tree.setColumnCount(1)
@@ -188,6 +193,7 @@ class HearthMainWindow(QMainWindow):
         header.addSpacing(12)
         header.addWidget(self.kindle_status_label)
         header.addStretch(1)
+        header.addWidget(self.progress_bar)
         header.addWidget(self.status_label)
 
         self._configure_library_tab()
@@ -302,11 +308,7 @@ class HearthMainWindow(QMainWindow):
         conversion_layout = QGridLayout()
         conversion_layout.addWidget(QLabel("Preferred output"), 0, 0)
         conversion_layout.addWidget(self.desired_output_combo, 0, 1)
-        conversion_layout.addWidget(QLabel("KCC command"), 0, 2)
-        conversion_layout.addWidget(self.kcc_command_input, 0, 3)
-        conversion_layout.addWidget(QLabel("Calibre command"), 1, 0)
-        conversion_layout.addWidget(self.calibre_command_input, 1, 1, 1, 2)
-        conversion_layout.addWidget(self.reset_conversion_button, 1, 3)
+        conversion_layout.addWidget(self.reset_conversion_button, 0, 3)
         conversion_group.setLayout(conversion_layout)
 
         footer = QHBoxLayout()
@@ -367,8 +369,6 @@ class HearthMainWindow(QMainWindow):
             self.auth_password_input,
             self.auth_bearer_input,
             self.kindle_root_input,
-            self.kcc_command_input,
-            self.calibre_command_input,
         ]:
             edit.editingFinished.connect(self._save_settings_to_file)
 
@@ -762,6 +762,12 @@ class HearthMainWindow(QMainWindow):
                     continue
                 device_files.add(entry.name)
                 device_files.add(entry.path)
+                normalized = entry.path.strip("/")
+                if normalized:
+                    device_files.add(normalized)
+                    if normalized.startswith("documents/"):
+                        relative = normalized.removeprefix("documents/")
+                        device_files.add(relative)
 
         self.library_table.setRowCount(len(rows))
         for idx, row in enumerate(rows):
@@ -1274,6 +1280,8 @@ class HearthMainWindow(QMainWindow):
     def _set_busy(self, text: str) -> None:
         self.is_busy = True
         self.status_label.setText(text)
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setVisible(True)
         self.load_catalog_button.setEnabled(False)
         self.sync_selected_button.setEnabled(False)
         self.refresh_files_button.setEnabled(False)
@@ -1284,6 +1292,8 @@ class HearthMainWindow(QMainWindow):
     def _set_idle(self) -> None:
         self.is_busy = False
         self.status_label.setText("Idle")
+        self.progress_bar.setVisible(False)
+        self.progress_bar.setRange(0, 1)
         self.load_catalog_button.setEnabled(True)
         self.sync_selected_button.setEnabled(True)
         self.refresh_files_button.setEnabled(True)
