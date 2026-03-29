@@ -100,11 +100,7 @@ class SyncManager:
         self.device.ensure_layout()
         emit(0, f"Preparing sync for {len(items)} item(s)...", is_log=True)
         records = load_metadata(self.metadata_path)
-        listed_files = [
-            entry
-            for entry in self.device.list_files()
-            if not entry.is_dir
-        ]
+        listed_files = [entry for entry in self.device.list_files() if not entry.is_dir]
         emit(
             0,
             f"Indexed {len(listed_files)} file(s) currently on Kindle",
@@ -182,10 +178,7 @@ class SyncManager:
             if detected_kcc_profile:
                 emit(
                     processed,
-                    (
-                        "auto-detected KCC device profile: "
-                        f"{detected_kcc_profile}"
-                    ),
+                    ("auto-detected KCC device profile: " f"{detected_kcc_profile}"),
                     is_log=True,
                 )
 
@@ -257,10 +250,7 @@ class SyncManager:
         save_metadata(self.metadata_path, records)
         emit(
             len(items),
-            (
-                f"Sync complete: synced={outcome.synced} "
-                f"skipped={outcome.skipped}"
-            ),
+            (f"Sync complete: synced={outcome.synced} " f"skipped={outcome.skipped}"),
             is_log=True,
         )
         return outcome
