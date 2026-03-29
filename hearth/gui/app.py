@@ -5,11 +5,10 @@ from __future__ import annotations
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
-import shutil
 from typing import Any, Callable, Literal, cast
 import urllib.parse
 
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt  # type: ignore[import-not-found]
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -22,20 +21,20 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
-    QTextEdit,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
-)
+)  # type: ignore[import-not-found]
 
 from hearth.converters.manager import ConverterManager
 from hearth.core.opds import OPDSClient, OPDSSession
 from hearth.core.settings import Settings
-from hearth.sync.device import KindleDevice
+from hearth.sync.device import DeviceFile, KindleDevice
 from hearth.sync.manager import SyncItem, SyncManager
 from hearth.sync.metadata import load_metadata
 
@@ -77,6 +76,12 @@ class PendingTask:
 class DeviceSnapshot:
     transport: str
     root: Path
+
+
+@dataclass(slots=True)
+class KindleFilesLoadResult:
+    rows: list[DeviceFile]
+    diagnostics: list[str]
 
 
 class HearthMainWindow(QMainWindow):
@@ -145,8 +150,9 @@ class HearthMainWindow(QMainWindow):
             ["Sync", "Title", "Author", "Type", "Status"]
         )
 
-        self.kindle_files_table = QTableWidget(0, 2)
-        self.kindle_files_table.setHorizontalHeaderLabels(["Filename", "Size"])
+        self.kindle_files_tree = QTreeWidget()
+        self.kindle_files_tree.setColumnCount(3)
+        self.kindle_files_tree.setHeaderLabels(["Name", "Type", "Size"])
 
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
@@ -241,22 +247,18 @@ class HearthMainWindow(QMainWindow):
         controls.addWidget(self.download_selected_file_button, 1, 1)
         controls.addWidget(self.delete_selected_file_button, 1, 2)
 
-        files_header = self.kindle_files_table.horizontalHeader()
+        files_header = self.kindle_files_tree.header()
         if files_header is not None:
             files_header.setStretchLastSection(True)
-        files_vertical = self.kindle_files_table.verticalHeader()
-        if files_vertical is not None:
-            files_vertical.setVisible(False)
-
-        self.kindle_files_table.setSelectionBehavior(
-            QTableWidget.SelectionBehavior.SelectRows
-        )
-        self.kindle_files_table.setSelectionMode(
-            QTableWidget.SelectionMode.ExtendedSelection
+        self.kindle_files_tree.setColumnWidth(0, 560)
+        self.kindle_files_tree.setColumnWidth(1, 90)
+        self.kindle_files_tree.setColumnWidth(2, 140)
+        self.kindle_files_tree.setSelectionMode(
+            QTreeWidget.SelectionMode.ExtendedSelection
         )
 
         layout.addLayout(controls)
-        layout.addWidget(self.kindle_files_table)
+        layout.addWidget(self.kindle_files_tree)
 
         self.kindle_files_tab.setLayout(layout)
 
@@ -495,8 +497,12 @@ class HearthMainWindow(QMainWindow):
     def _on_probe_kindle_result(self, result: object) -> None:
         if result is None:
             self.connected_device = None
-            self.kindle_status_label.setText("Kindle: not connected")
-            self.kindle_files_table.setRowCount(0)
+            if self.transport_combo.currentText() == "mtp":
+                self.kindle_status_label.setText("Kindle: MTP backend unavailable")
+                self._log("MTP selected, but go-mtpx bridge is unavailable")
+            else:
+                self.kindle_status_label.setText("Kindle: not connected")
+            self.kindle_files_tree.clear()
             self._log("Kindle not detected")
         elif isinstance(result, DeviceSnapshot):
             self.connected_device = result
@@ -504,6 +510,7 @@ class HearthMainWindow(QMainWindow):
                 f"Kindle: {result.transport} at {result.root}"
             )
             self._log(f"Detected Kindle at {result.root}")
+            self._log_kindle_probe_details(result)
             self._refresh_kindle_files(force=True)
         else:
             raise TypeError("Unexpected probe result")
@@ -741,9 +748,20 @@ class HearthMainWindow(QMainWindow):
                 transport=self.connected_device.transport,
                 root=self.connected_device.root,
             )
-            metadata_path = device.documents_dir / ".hearth_metadata.json"
+            if device.transport == "mtp":
+                metadata_path = (
+                    Path(self.workspace_input.text().strip() or ".hearth")
+                    / ".hearth_metadata.mtp.json"
+                )
+            else:
+                metadata_path = device.documents_dir / ".hearth_metadata.json"
             records = load_metadata(metadata_path)
-            device_files = {p.name for p in device.list_files()}
+            device_files = set()
+            for entry in device.list_files():
+                if entry.is_dir:
+                    continue
+                device_files.add(entry.name)
+                device_files.add(entry.path)
 
         self.library_table.setRowCount(len(rows))
         for idx, row in enumerate(rows):
@@ -903,7 +921,7 @@ class HearthMainWindow(QMainWindow):
             return
 
         if self.connected_device is None:
-            self.kindle_files_table.setRowCount(0)
+            self.kindle_files_tree.clear()
             return
 
         if not self.is_busy:
@@ -922,50 +940,170 @@ class HearthMainWindow(QMainWindow):
             )
         )
 
+    def _log_kindle_probe_details(self, snapshot: DeviceSnapshot) -> None:
+        device = KindleDevice(
+            transport=snapshot.transport,
+            root=snapshot.root,
+        )
+        root = device.root
+        docs = device.documents_dir
+
+        self._log(f"[kindle-diag] root exists={root.exists()} dir={root.is_dir()}")
+        self._log(
+            f"[kindle-diag] documents path={docs} exists={docs.exists()} "
+            f"dir={docs.is_dir()}"
+        )
+
+        for candidate in device.hearth_dir_candidates():
+            self._log(
+                f"[kindle-diag] candidate {candidate} " f"exists={candidate.exists()}"
+            )
+
+        if snapshot.transport == "mtp":
+            mtp_diag = KindleDevice.mtp_backend().diagnostics()
+            self._log(f"[kindle-diag] mtp available={mtp_diag['available']}")
+            self._log(
+                "[kindle-diag] mtp commands: "
+                f"detect={mtp_diag['detect_cmd']} "
+                f"files={mtp_diag['files_cmd']} "
+                f"folders={mtp_diag['folders_cmd']} "
+                f"get={mtp_diag['get_cmd']} "
+                f"send={mtp_diag['send_cmd']} "
+                f"delete={mtp_diag['delete_cmd']}"
+            )
+            self._log(f"[kindle-diag] mtp install hint={mtp_diag['install_hint']}")
+
+        try:
+            entries = sorted(path.name for path in root.iterdir())[:12]
+        except OSError as exc:
+            self._log(f"[kindle-diag] root list failed: {exc}")
+        else:
+            self._log(
+                f"[kindle-diag] root entries({len(entries)} shown): "
+                + ", ".join(entries)
+            )
+
     def _list_kindle_files_worker(
         self,
         transport: str,
         root: str,
-    ) -> list[tuple[str, int]]:
+    ) -> KindleFilesLoadResult:
         device = KindleDevice(transport=transport, root=Path(root))
-        rows: list[tuple[str, int]] = []
-        for path in device.list_files():
-            try:
-                size = path.stat().st_size
-            except OSError:
-                size = 0
-            rows.append((path.name, size))
+        diagnostics: list[str] = []
+        diagnostics.append(
+            f"transport={transport} root={device.root} "
+            f"exists={device.root.exists()}"
+        )
+        diagnostics.append(
+            f"documents={device.documents_dir} "
+            f"exists={device.documents_dir.exists()}"
+        )
 
-        rows.sort(key=lambda item: item[0].lower())
-        return rows
-
-    def _populate_kindle_files(self, result: object) -> None:
-        if not isinstance(result, list):
-            raise TypeError("Unexpected kindle files result")
-
-        rows = cast(list[tuple[str, int]], result)
-        self.kindle_files_table.setRowCount(len(rows))
-        for idx, (name, size) in enumerate(rows):
-            self.kindle_files_table.setItem(idx, 0, QTableWidgetItem(name))
-            self.kindle_files_table.setItem(
-                idx,
-                1,
-                QTableWidgetItem(str(size)),
+        if transport == "mtp":
+            mtp_diag = KindleDevice.mtp_backend().diagnostics()
+            diagnostics.append(f"mtp available={mtp_diag['available']}")
+            diagnostics.append(
+                "mtp commands "
+                f"detect={mtp_diag['detect_cmd']} "
+                f"files={mtp_diag['files_cmd']} "
+                f"folders={mtp_diag['folders_cmd']} "
+                f"get={mtp_diag['get_cmd']} "
+                f"send={mtp_diag['send_cmd']} "
+                f"delete={mtp_diag['delete_cmd']}"
             )
 
-        self._log(f"Loaded {len(rows)} files from Kindle")
+        for candidate in device.hearth_dir_candidates():
+            diagnostics.append(f"candidate={candidate} exists={candidate.exists()}")
+
+        rows: list[DeviceFile] = []
+        try:
+            listed = device.list_files()
+        except (OSError, RuntimeError) as exc:
+            diagnostics.append(f"list_files failed: {exc}")
+            return KindleFilesLoadResult(rows=rows, diagnostics=diagnostics)
+
+        diagnostics.append(f"list_files count={len(listed)}")
+        rows = sorted(listed, key=lambda item: item.path.lower())
+        return KindleFilesLoadResult(rows=rows, diagnostics=diagnostics)
+
+    def _populate_kindle_files(self, result: object) -> None:
+        if not isinstance(result, KindleFilesLoadResult):
+            raise TypeError("Unexpected kindle files result")
+
+        for line in result.diagnostics:
+            self._log(f"[kindle-diag] {line}")
+
+        self._populate_kindle_files_tree(result.rows)
+
+        file_count = len([row for row in result.rows if not row.is_dir])
+        dir_count = len([row for row in result.rows if row.is_dir])
+        self._log(f"Loaded {file_count} files and {dir_count} folders from Kindle")
+
+    def _populate_kindle_files_tree(self, rows: list[DeviceFile]) -> None:
+        self.kindle_files_tree.clear()
+        node_by_path: dict[str, QTreeWidgetItem] = {}
+
+        for entry in rows:
+            parts = [segment for segment in entry.path.split("/") if segment]
+            if not parts:
+                continue
+
+            parent_item: QTreeWidgetItem | None = None
+            current_path = ""
+            for idx, part in enumerate(parts):
+                current_path = f"{current_path}/{part}" if current_path else part
+                node = node_by_path.get(current_path)
+                is_leaf = idx == len(parts) - 1
+                if node is None:
+                    node = QTreeWidgetItem([part, "Folder", ""])
+                    node.setData(0, Qt.ItemDataRole.UserRole, current_path)
+                    node.setData(1, Qt.ItemDataRole.UserRole, False)
+                    if parent_item is None:
+                        self.kindle_files_tree.addTopLevelItem(node)
+                    else:
+                        parent_item.addChild(node)
+                    node_by_path[current_path] = node
+
+                if is_leaf:
+                    is_file = not entry.is_dir
+                    node.setText(0, entry.name)
+                    node.setText(1, "File" if is_file else "Folder")
+                    node.setText(
+                        2,
+                        self._format_size(entry.size) if is_file else "",
+                    )
+                    node.setData(0, Qt.ItemDataRole.UserRole, entry.path)
+                    node.setData(1, Qt.ItemDataRole.UserRole, is_file)
+
+                parent_item = node
+
+        self.kindle_files_tree.collapseAll()
+
+    def _format_size(self, size_bytes: int) -> str:
+        if size_bytes < 0:
+            return "0 B"
+        units = ["B", "KB", "MB", "GB", "TB"]
+        value = float(size_bytes)
+        unit_idx = 0
+        while value >= 1024.0 and unit_idx < len(units) - 1:
+            value /= 1024.0
+            unit_idx += 1
+        if unit_idx == 0:
+            return f"{int(value)} {units[unit_idx]}"
+        return f"{value:.1f} {units[unit_idx]}"
 
     def _selected_kindle_file_names(self) -> list[str]:
-        selection_model = self.kindle_files_table.selectionModel()
-        if selection_model is None:
-            return []
-
         names: list[str] = []
-        for index in selection_model.selectedRows():
-            item = self.kindle_files_table.item(index.row(), 0)
-            if item is None:
+        seen: set[str] = set()
+        for item in self.kindle_files_tree.selectedItems():
+            is_file = item.data(1, Qt.ItemDataRole.UserRole)
+            path = item.data(0, Qt.ItemDataRole.UserRole)
+            if is_file is not True or not isinstance(path, str):
                 continue
-            names.append(item.text())
+            if path in seen:
+                continue
+            seen.add(path)
+            names.append(path)
         return names
 
     def _download_selected_kindle_files(self) -> None:
@@ -1014,12 +1152,36 @@ class HearthMainWindow(QMainWindow):
 
         copied = 0
         for name in names:
-            source = device.documents_dir / name
-            if not source.exists():
+            filename = self._download_filename(name)
+            destination_path = self._dedupe_download_path(destination / filename)
+            try:
+                device.download_file(name, destination_path)
+            except (OSError, RuntimeError):
                 continue
-            shutil.copy2(source, destination / name)
-            copied += 1
+            else:
+                copied += 1
         return copied
+
+    def _download_filename(self, source_path: str) -> str:
+        normalized = source_path.strip().rstrip("/")
+        candidate = Path(normalized).name
+        if not candidate:
+            return "download.bin"
+        return candidate
+
+    def _dedupe_download_path(self, destination: Path) -> Path:
+        if not destination.exists():
+            return destination
+
+        stem = destination.stem
+        suffix = destination.suffix
+        parent = destination.parent
+        index = 1
+        while True:
+            candidate = parent / f"{stem} ({index}){suffix}"
+            if not candidate.exists():
+                return candidate
+            index += 1
 
     def _on_files_downloaded(self, result: object) -> None:
         if not isinstance(result, int):

@@ -26,7 +26,7 @@ Modern Kindles do not always expose a simple mounted filesystem. Some require MT
 Implementation response:
 
 - `KindleDevice` supports USB and MTP flows under one API.
-- MTP path uses a persistent libmtp backend and transport probing.
+- MTP path uses a persistent go-mtpx bridge backend and transport probing.
 - Fallback behavior exists when MTP sessions are unavailable.
 
 Learning:
@@ -35,13 +35,13 @@ Device access should be abstracted from business logic. The sync layer should no
 ### 2) MTP session instability and platform quirks
 
 Hurdle:
-MTP can be transient and brittle, especially on macOS depending on libmtp/tool availability.
+MTP can be transient and brittle, especially on macOS depending on bridge/tool availability.
 
 Implementation response:
 
 - Sticky probe windows to reduce false disconnects.
 - Shared backend/session reuse to avoid churn.
-- Auto-install option for missing libmtp backend on macOS.
+- Build/install guidance for the go-mtpx bridge backend on macOS.
 - Candidate path retries for remote Hearth folder operations.
 
 Learning:

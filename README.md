@@ -21,6 +21,11 @@ Optional runtime tools (not required for current placeholder conversion logic):
 - Kindle Comic Converter CLI
 - Calibre (`ebook-convert`)
 
+MTP runtime tools (required when `kindle_transport` is `mtp`):
+
+- Go toolchain (`go`)
+- `libusb` (on macOS: `brew install libusb pkg-config`)
+
 ## Quick Start
 
 1. Create and activate a virtual environment:
@@ -116,6 +121,8 @@ Notes:
 - Kindle detection is automatic on startup and can be retried with
   the `Probe Kindle` button.
 - EPUB output is not exposed in GUI settings for USB Kindle transfer.
+- The MTP path uses a persistent go-mtpx bridge process. Hearth auto-builds
+  the bridge at first use from `hearth/sync/mtpx_bridge`.
 
 ## Run Tests
 

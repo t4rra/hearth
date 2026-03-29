@@ -56,6 +56,8 @@ class SyncManager:
 
     @property
     def metadata_path(self) -> Path:
+        if self.device.transport == "mtp":
+            return self.workspace / ".hearth_metadata.mtp.json"
         return self.device.documents_dir / ".hearth_metadata.json"
 
     def sync(
@@ -65,9 +67,14 @@ class SyncManager:
     ) -> SyncOutcome:
         self.device.ensure_layout()
         records = load_metadata(self.metadata_path)
+        listed_files = [entry for entry in self.device.list_files() if not entry.is_dir]
+        on_device_names: set[str] = set()
+        for entry in listed_files:
+            on_device_names.add(entry.path)
+            on_device_names.add(entry.name)
         records = reconcile_on_device(
             records,
-            {p.name for p in self.device.list_files()},
+            on_device_names,
         )
         downloads_dir = self.workspace / "downloads"
         converted_dir = self.workspace / "converted"

@@ -23,3 +23,21 @@ def test_hearth_dir_candidates_include_documents(tmp_path: Path) -> None:
     device = KindleDevice(transport="usb", root=tmp_path / "kindle")
     candidates = device.hearth_dir_candidates()
     assert any(path.name == "documents" for path in candidates)
+
+
+def test_usb_list_files_includes_tree_entries(tmp_path: Path) -> None:
+    device = KindleDevice(transport="usb", root=tmp_path / "kindle")
+    nested_dir = device.documents_dir / "Comics" / "Series"
+    nested_dir.mkdir(parents=True, exist_ok=True)
+    nested_file = nested_dir / "Volume 01.cbz"
+    nested_file.write_text("cbz-bytes", encoding="utf-8")
+
+    entries = device.list_files()
+    paths = {entry.path: entry for entry in entries}
+
+    assert "Comics" in paths
+    assert paths["Comics"].is_dir is True
+    assert "Comics/Series" in paths
+    assert paths["Comics/Series"].is_dir is True
+    assert "Comics/Series/Volume 01.cbz" in paths
+    assert paths["Comics/Series/Volume 01.cbz"].is_dir is False
