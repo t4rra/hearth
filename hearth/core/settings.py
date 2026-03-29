@@ -21,6 +21,10 @@ class Settings:
     kindle_mount: str = ""
     desired_output: Literal["auto", "epub", "mobi"] = "auto"
     kcc_command: str = ""
+    kcc_device: str = "auto"
+    kcc_manga_default: bool = False
+    kcc_manga_force: bool = False
+    kcc_autolevel: bool = True
     calibre_command: str = ""
 
     @classmethod

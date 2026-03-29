@@ -16,10 +16,15 @@ This repository currently includes:
 - Python 3.11+
 - macOS (primary target from current project mandate)
 
-Optional runtime tools (not required for current placeholder conversion logic):
+Optional runtime tools (required for real conversion of supported types):
 
-- Kindle Comic Converter CLI
+- Kindle Comic Converter CLI (`kcc-c2e` or `comic2ebook`)
 - Calibre (`ebook-convert`)
+
+Notes:
+
+- Comic inputs (`.cbz`, `.cbr`) are converted through KCC for device-profile parity with KCC GUI output.
+- EPUB/ZIP/PDF inputs are converted through Calibre.
 
 MTP runtime tools (required when `kindle_transport` is `mtp`):
 
@@ -144,4 +149,4 @@ The `TESTING FILES` directory contains large real-world sample files used by tes
 
 ## Current Status
 
-The architecture and sync/test flow are implemented. Converter backends are intentionally structured for integration but currently use placeholder conversion behavior until real subprocess integration is wired in.
+The architecture and sync/test flow are implemented, including real subprocess-backed conversion calls. For CBZ/CBR and EPUB/ZIP/PDF inputs, conversion now requires an installed converter tool and fails with a clear error when unavailable.

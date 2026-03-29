@@ -31,6 +31,7 @@ def _discover_items(client: OPDSClient, feed_url: str) -> list[SyncItem]:
             SyncItem(
                 id=entry.id,
                 title=entry.title,
+                author=entry.author,
                 download_url=link.href,
                 declared_type=link.type,
             )
@@ -53,6 +54,10 @@ def main(argv: list[str] | None = None) -> int:
     client = OPDSClient(session)
     converters = ConverterManager.from_commands(
         settings.kcc_command,
+        settings.kcc_device,
+        settings.kcc_manga_default,
+        settings.kcc_manga_force,
+        settings.kcc_autolevel,
         settings.calibre_command,
     )
     device = KindleDevice.probe(

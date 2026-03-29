@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Empty, SimpleQueue
 from typing import Any, Callable, Literal, cast
 import urllib.parse
 
@@ -36,7 +37,7 @@ from hearth.converters.manager import ConverterManager
 from hearth.core.opds import OPDSClient, OPDSSession
 from hearth.core.settings import Settings
 from hearth.sync.device import DeviceFile, KindleDevice
-from hearth.sync.manager import SyncItem, SyncManager
+from hearth.sync.manager import SyncItem, SyncManager, SyncProgress
 from hearth.sync.metadata import load_metadata
 
 from .workers import WorkerPool
@@ -100,6 +101,9 @@ class HearthMainWindow(QMainWindow):
         self.connected_device: DeviceSnapshot | None = None
         self.is_busy = False
         self.startup_catalog_attempted = False
+        self.status_base_text = "Idle"
+        self.status_anim_frame = 0
+        self.sync_progress_queue: SimpleQueue[SyncProgress] | None = None
 
         self.books_by_feed: dict[str, list[LibraryRow]] = {}
         self.loaded_feeds: set[str] = set()
@@ -125,6 +129,14 @@ class HearthMainWindow(QMainWindow):
         self.desired_output_combo = QComboBox()
         self.desired_output_combo.addItems(["auto", "mobi"])
         self.kcc_command_input = QLineEdit("")
+        self.kcc_device_input = QComboBox()
+        self.kcc_device_input.setEditable(False)
+        self.kcc_manga_default_checkbox = QCheckBox(
+            "Manga as default reading direction"
+        )
+        self.kcc_manga_force_checkbox = QCheckBox("Force manga reading direction")
+        self.kcc_autolevel_checkbox = QCheckBox("Enable KCC autolevel")
+        self.kcc_autolevel_checkbox.setChecked(True)
         self.calibre_command_input = QLineEdit("")
 
         self.probe_kindle_button = QPushButton("Probe Kindle")
@@ -140,11 +152,32 @@ class HearthMainWindow(QMainWindow):
         self.delete_selected_file_button = QPushButton("Delete Selected")
 
         self.status_label = QLabel("Idle")
+        self.status_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
         self.kindle_status_label = QLabel("Kindle: probing...")
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setVisible(False)
-        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFixedWidth(420)
+
+        self._kcc_profiles = [
+            ("Auto (detected)", "auto"),
+            ("Kindle 1", "K1"),
+            ("Kindle 2", "K2"),
+            ("Kindle Keyboard/Touch", "K34"),
+            ("Kindle 5/7/8/10", "K578"),
+            ("Kindle DX/DXG", "KDX"),
+            ("Kindle Paperwhite 1/2", "KPW"),
+            ("Kindle Paperwhite 5/Signature Edition", "KPW5"),
+            ("Kindle Voyage", "KV"),
+            ("Kindle Oasis 2/3", "KO"),
+            ("Kindle 11", "K11"),
+            ("Kindle Scribe 1/2", "KS"),
+        ]
+        for label, code in self._kcc_profiles:
+            self.kcc_device_input.addItem(label, code)
 
         self.collections_tree = QTreeWidget()
         self.collections_tree.setColumnCount(1)
@@ -193,8 +226,16 @@ class HearthMainWindow(QMainWindow):
         header.addSpacing(12)
         header.addWidget(self.kindle_status_label)
         header.addStretch(1)
-        header.addWidget(self.progress_bar)
-        header.addWidget(self.status_label)
+
+        progress_container = QWidget()
+        progress_layout = QVBoxLayout()
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(4)
+        progress_layout.addWidget(self.status_label)
+        progress_layout.addWidget(self.progress_bar)
+        progress_container.setLayout(progress_layout)
+        progress_container.setFixedWidth(420)
+        header.addWidget(progress_container)
 
         self._configure_library_tab()
         self._configure_kindle_files_tab()
@@ -308,7 +349,14 @@ class HearthMainWindow(QMainWindow):
         conversion_layout = QGridLayout()
         conversion_layout.addWidget(QLabel("Preferred output"), 0, 0)
         conversion_layout.addWidget(self.desired_output_combo, 0, 1)
-        conversion_layout.addWidget(self.reset_conversion_button, 0, 3)
+        conversion_layout.addWidget(QLabel("KCC command"), 1, 0)
+        conversion_layout.addWidget(self.kcc_command_input, 1, 1, 1, 3)
+        conversion_layout.addWidget(QLabel("KCC device"), 2, 0)
+        conversion_layout.addWidget(self.kcc_device_input, 2, 1)
+        conversion_layout.addWidget(self.kcc_manga_default_checkbox, 3, 0, 1, 2)
+        conversion_layout.addWidget(self.kcc_manga_force_checkbox, 3, 2, 1, 2)
+        conversion_layout.addWidget(self.kcc_autolevel_checkbox, 4, 0, 1, 2)
+        conversion_layout.addWidget(self.reset_conversion_button, 5, 3)
         conversion_group.setLayout(conversion_layout)
 
         footer = QHBoxLayout()
@@ -358,8 +406,16 @@ class HearthMainWindow(QMainWindow):
             self.auth_mode_combo,
             self.transport_combo,
             self.desired_output_combo,
+            self.kcc_device_input,
         ]:
             combo.currentTextChanged.connect(self._save_settings_to_file)
+
+        for checkbox in [
+            self.kcc_manga_default_checkbox,
+            self.kcc_manga_force_checkbox,
+            self.kcc_autolevel_checkbox,
+        ]:
+            checkbox.toggled.connect(self._save_settings_to_file)
 
         for edit in [
             self.workspace_input,
@@ -369,6 +425,7 @@ class HearthMainWindow(QMainWindow):
             self.auth_password_input,
             self.auth_bearer_input,
             self.kindle_root_input,
+            self.kcc_command_input,
         ]:
             edit.editingFinished.connect(self._save_settings_to_file)
 
@@ -389,6 +446,10 @@ class HearthMainWindow(QMainWindow):
         self.desired_output_combo.setCurrentText(output)
 
         self.kcc_command_input.setText(settings.kcc_command)
+        self._set_kcc_device_ui(settings.kcc_device)
+        self.kcc_manga_default_checkbox.setChecked(settings.kcc_manga_default)
+        self.kcc_manga_force_checkbox.setChecked(settings.kcc_manga_force)
+        self.kcc_autolevel_checkbox.setChecked(settings.kcc_autolevel)
         self.calibre_command_input.setText(settings.calibre_command)
 
         self._update_auth_visibility()
@@ -422,6 +483,10 @@ class HearthMainWindow(QMainWindow):
             kindle_mount=self.kindle_root_input.text().strip(),
             desired_output=desired_output,
             kcc_command=self.kcc_command_input.text().strip(),
+            kcc_device=self._selected_kcc_device_code(),
+            kcc_manga_default=self.kcc_manga_default_checkbox.isChecked(),
+            kcc_manga_force=self.kcc_manga_force_checkbox.isChecked(),
+            kcc_autolevel=self.kcc_autolevel_checkbox.isChecked(),
             calibre_command=self.calibre_command_input.text().strip(),
         )
 
@@ -447,8 +512,39 @@ class HearthMainWindow(QMainWindow):
     def _reset_conversion(self) -> None:
         self.desired_output_combo.setCurrentText("auto")
         self.kcc_command_input.setText("")
+        self._set_kcc_device_ui("auto")
+        self.kcc_manga_default_checkbox.setChecked(False)
+        self.kcc_manga_force_checkbox.setChecked(False)
+        self.kcc_autolevel_checkbox.setChecked(True)
         self.calibre_command_input.setText("")
         self._save_settings_to_file()
+
+    def _selected_kcc_device_code(self) -> str:
+        idx = self.kcc_device_input.currentIndex()
+        if idx < 0:
+            return "auto"
+        value = self.kcc_device_input.itemData(idx)
+        if isinstance(value, str) and value.strip():
+            return value
+        return "auto"
+
+    def _set_kcc_device_ui(self, value: str) -> None:
+        needle = (value or "auto").strip().upper()
+        aliases = {
+            "KOA": "KO",
+            "KPW34": "KPW",
+            "K57": "K578",
+            "K810": "K578",
+        }
+        needle = aliases.get(needle, needle)
+        if needle == "AUTO":
+            needle = "auto"
+        for idx in range(self.kcc_device_input.count()):
+            code = self.kcc_device_input.itemData(idx)
+            if isinstance(code, str) and code.upper() == needle.upper():
+                self.kcc_device_input.setCurrentIndex(idx)
+                return
+        self.kcc_device_input.setCurrentIndex(0)
 
     def _reset_all(self) -> None:
         self._reset_general()
@@ -783,6 +879,7 @@ class HearthMainWindow(QMainWindow):
                 {
                     "id": row.id,
                     "title": row.title,
+                    "author": row.author,
                     "download_url": row.download_url,
                     "declared_type": row.declared_type,
                 },
@@ -839,6 +936,7 @@ class HearthMainWindow(QMainWindow):
                 SyncItem(
                     id=payload["id"],
                     title=payload["title"],
+                    author=payload.get("author", ""),
                     download_url=payload["download_url"],
                     declared_type=payload["declared_type"],
                 )
@@ -871,7 +969,11 @@ class HearthMainWindow(QMainWindow):
         root = self.connected_device.root
         force_resync = self.force_checkbox.isChecked()
 
-        self._set_busy(f"Syncing {len(items)} items...")
+        self.sync_progress_queue = SimpleQueue()
+        self._set_busy(
+            f"Syncing {len(items)} items",
+            determinate_total=len(items),
+        )
         future = self.worker_pool.submit(
             self._run_sync_worker,
             settings,
@@ -899,6 +1001,10 @@ class HearthMainWindow(QMainWindow):
         session = OPDSSession(settings)
         converters = ConverterManager.from_commands(
             settings.kcc_command,
+            settings.kcc_device,
+            settings.kcc_manga_default,
+            settings.kcc_manga_force,
+            settings.kcc_autolevel,
             settings.calibre_command,
         )
         device = KindleDevice.probe(
@@ -911,7 +1017,16 @@ class HearthMainWindow(QMainWindow):
             device=device,
             workspace=workspace,
         )
-        outcome = manager.sync(items=items, force_resync=force_resync)
+
+        def on_progress(event: SyncProgress) -> None:
+            if self.sync_progress_queue is not None:
+                self.sync_progress_queue.put(event)
+
+        outcome = manager.sync(
+            items=items,
+            force_resync=force_resync,
+            progress_callback=on_progress,
+        )
         return (outcome.synced, outcome.skipped)
 
     def _on_sync_finished(self, result: object) -> None:
@@ -920,6 +1035,7 @@ class HearthMainWindow(QMainWindow):
 
         synced, skipped = result
         self._log(f"Sync complete: synced={synced}, skipped={skipped}")
+        self.sync_progress_queue = None
         self._refresh_kindle_files(force=True)
 
     def _refresh_kindle_files(self, force: bool = False) -> None:
@@ -1098,13 +1214,15 @@ class HearthMainWindow(QMainWindow):
             return f"{int(value)} {units[unit_idx]}"
         return f"{value:.1f} {units[unit_idx]}"
 
-    def _selected_kindle_file_names(self) -> list[str]:
+    def _selected_kindle_paths(self, files_only: bool = True) -> list[str]:
         names: list[str] = []
         seen: set[str] = set()
         for item in self.kindle_files_tree.selectedItems():
             is_file = item.data(1, Qt.ItemDataRole.UserRole)
             path = item.data(0, Qt.ItemDataRole.UserRole)
-            if is_file is not True or not isinstance(path, str):
+            if not isinstance(path, str):
+                continue
+            if files_only and is_file is not True:
                 continue
             if path in seen:
                 continue
@@ -1119,7 +1237,7 @@ class HearthMainWindow(QMainWindow):
             QMessageBox.warning(self, "No Kindle", "No connected Kindle.")
             return
 
-        names = self._selected_kindle_file_names()
+        names = self._selected_kindle_paths(files_only=True)
         if not names:
             QMessageBox.information(
                 self,
@@ -1201,19 +1319,19 @@ class HearthMainWindow(QMainWindow):
             QMessageBox.warning(self, "No Kindle", "No connected Kindle.")
             return
 
-        names = self._selected_kindle_file_names()
+        names = self._selected_kindle_paths(files_only=False)
         if not names:
             QMessageBox.information(
                 self,
-                "No file selected",
-                "Select one or more files in Kindle Files.",
+                "No selection",
+                "Select one or more files or folders in Kindle Files.",
             )
             return
 
         answer = QMessageBox.question(
             self,
-            "Delete files",
-            f"Delete {len(names)} selected file(s) from Kindle?",
+            "Delete items",
+            f"Delete {len(names)} selected item(s) from Kindle?",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -1249,10 +1367,13 @@ class HearthMainWindow(QMainWindow):
     def _on_files_deleted(self, result: object) -> None:
         if not isinstance(result, int):
             raise TypeError("Unexpected delete result")
-        self._log(f"Deleted {result} file(s)")
+        self._log(f"Deleted {result} item(s)")
         self._refresh_kindle_files(force=True)
 
     def _poll_pending_tasks(self) -> None:
+        self._drain_sync_progress_events()
+        self._animate_busy_status()
+
         remaining: list[PendingTask] = []
         for task in self.pending_tasks:
             if not task.future.done():
@@ -1265,6 +1386,8 @@ class HearthMainWindow(QMainWindow):
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 feed = task.action_name.removeprefix("load feed ")
                 self.loading_feeds.discard(feed)
+                if task.action_name == "sync":
+                    self.sync_progress_queue = None
                 self._log(f"{task.action_name} failed: {exc}")
                 if task.show_errors:
                     QMessageBox.critical(
@@ -1277,10 +1400,48 @@ class HearthMainWindow(QMainWindow):
         if self.is_busy and not self.pending_tasks:
             self._set_idle()
 
-    def _set_busy(self, text: str) -> None:
+    def _drain_sync_progress_events(self) -> None:
+        if self.sync_progress_queue is None:
+            return
+
+        while True:
+            try:
+                event = self.sync_progress_queue.get_nowait()
+            except Empty:
+                break
+
+            if event.total > 0:
+                max_value = event.total * 100
+                current_value = int(max(0.0, min(event.current, event.total)) * 100)
+                self.progress_bar.setRange(0, max_value)
+                self.progress_bar.setValue(current_value)
+            self.status_base_text = event.message
+            if event.is_log:
+                self._log(f"[sync] {event.message}")
+
+    def _animate_busy_status(self) -> None:
+        if not self.is_busy:
+            return
+        self.status_anim_frame = (self.status_anim_frame + 1) % 4
+        suffix = "." * self.status_anim_frame
+        self._set_status_text(f"{self.status_base_text}{suffix}")
+
+    def _set_status_text(self, text: str) -> None:
+        metrics = self.status_label.fontMetrics()
+        width = max(40, self.status_label.width() - 4)
+        elided = metrics.elidedText(text, Qt.TextElideMode.ElideRight, width)
+        self.status_label.setText(elided)
+
+    def _set_busy(self, text: str, determinate_total: int | None = None) -> None:
         self.is_busy = True
-        self.status_label.setText(text)
-        self.progress_bar.setRange(0, 0)
+        self.status_base_text = text
+        self.status_anim_frame = 0
+        self._set_status_text(text)
+        if determinate_total is None:
+            self.progress_bar.setRange(0, 0)
+        else:
+            self.progress_bar.setRange(0, max(1, determinate_total) * 100)
+            self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
         self.load_catalog_button.setEnabled(False)
         self.sync_selected_button.setEnabled(False)
@@ -1291,9 +1452,11 @@ class HearthMainWindow(QMainWindow):
 
     def _set_idle(self) -> None:
         self.is_busy = False
-        self.status_label.setText("Idle")
+        self.status_base_text = "Idle"
+        self._set_status_text("Idle")
         self.progress_bar.setVisible(False)
         self.progress_bar.setRange(0, 1)
+        self.progress_bar.setValue(0)
         self.load_catalog_button.setEnabled(True)
         self.sync_selected_button.setEnabled(True)
         self.refresh_files_button.setEnabled(True)
@@ -1303,6 +1466,10 @@ class HearthMainWindow(QMainWindow):
 
     def _log(self, message: str) -> None:
         self.log_output.append(message)
+
+    def resizeEvent(self, event) -> None:  # pragma: no cover
+        self._set_status_text(self.status_base_text)
+        super().resizeEvent(event)
 
     def closeEvent(self, event) -> None:  # pragma: no cover
         self.worker_pool.shutdown()

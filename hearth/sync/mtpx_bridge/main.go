@@ -133,7 +133,11 @@ func handleRequest(state *bridgeState, req request) response {
 			state.close()
 			return response{ID: req.ID, OK: true, Result: map[string]bool{"detected": false}}
 		}
-		return response{ID: req.ID, OK: true, Result: map[string]bool{"detected": true}}
+		result := map[string]interface{}{"detected": true}
+		if info, err := mtpx.FetchDeviceInfo(state.dev); err == nil && info != nil {
+			result["device_info"] = fmt.Sprintf("%+v", info)
+		}
+		return response{ID: req.ID, OK: true, Result: result}
 	case "list":
 		return handleList(state, req)
 	case "download":

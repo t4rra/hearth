@@ -27,13 +27,22 @@ class FakeConversionResult:
 
 
 class FakeConverters:
+    def __init__(self) -> None:
+        self.last_source: Path | None = None
+
     def convert_for_kindle(
         self,
         source: Path,
         destination_dir: Path,
         stem: str,
+        title: str = "",
+        author: str = "",
+        kcc_device_hint: str = "",
+        progress_callback=None,
         declared_type: str = "",
     ) -> FakeConversionResult:
+        _ = (title, author, kcc_device_hint, progress_callback)
+        self.last_source = source
         _ = declared_type
         destination_dir.mkdir(parents=True, exist_ok=True)
         output = destination_dir / f"{stem}.epub"
@@ -90,3 +99,30 @@ def test_stale_state_is_reconciled(
 
     outcome = manager.sync([item])
     assert outcome.synced == 1
+
+
+def test_download_staging_path_has_extension(
+    tmp_path: Path,
+    sample_epub_path: Path,
+) -> None:
+    converters = FakeConverters()
+    manager = SyncManager(
+        session=FakeSession({"https://example.test/book": sample_epub_path}),
+        converters=converters,
+        device=KindleDevice("usb", tmp_path / "device"),
+        workspace=tmp_path / "workspace",
+    )
+
+    manager.sync(
+        [
+            SyncItem(
+                id="book-1",
+                title="Book One",
+                download_url="https://example.test/book",
+                declared_type="application/epub+zip",
+            )
+        ]
+    )
+
+    assert converters.last_source is not None
+    assert converters.last_source.suffix == ".epub"

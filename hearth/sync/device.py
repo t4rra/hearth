@@ -150,7 +150,10 @@ class KindleDevice:
         path = self.documents_dir / remote_name
         if not path.exists():
             return False
-        path.unlink()
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
         return True
 
     def list_files(self) -> list[DeviceFile]:

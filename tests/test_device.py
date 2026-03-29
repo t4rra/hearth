@@ -41,3 +41,13 @@ def test_usb_list_files_includes_tree_entries(tmp_path: Path) -> None:
     assert paths["Comics/Series"].is_dir is True
     assert "Comics/Series/Volume 01.cbz" in paths
     assert paths["Comics/Series/Volume 01.cbz"].is_dir is False
+
+
+def test_delete_folder_removes_nested_tree(tmp_path: Path) -> None:
+    device = KindleDevice(transport="usb", root=tmp_path / "kindle")
+    nested_dir = device.documents_dir / "Hearth" / "Series"
+    nested_dir.mkdir(parents=True, exist_ok=True)
+    (nested_dir / "Volume 01.mobi").write_text("payload", encoding="utf-8")
+
+    assert device.delete_file("Hearth") is True
+    assert not (device.documents_dir / "Hearth").exists()

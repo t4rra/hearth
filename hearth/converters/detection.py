@@ -4,6 +4,9 @@ from pathlib import Path
 import zipfile
 
 
+COMIC_EXTENSIONS = {".cbr", ".cbz", ".cbt", ".cba", ".cb7"}
+
+
 def _looks_like_epub_archive(path: Path) -> bool:
     if not path.exists() or not zipfile.is_zipfile(path):
         return False
@@ -36,17 +39,23 @@ def infer_extension(path: Path, declared_type: str = "") -> str:
     declared = declared_type.lower()
     suffix = path.suffix.lower()
 
-    if "epub" in declared:
-        return ".epub"
-    if "comic" in declared or "cbz" in declared:
-        return ".cbz"
-
-    if suffix in {".epub", ".mobi", ".azw3", ".cbz", ".cbr"}:
+    # Comic detection is extension-based.
+    if suffix in COMIC_EXTENSIONS:
         return suffix
 
+    # Trust explicit file extensions first when we have known formats.
+    if suffix in {".epub", ".mobi", ".azw3"}:
+        return suffix
+
+    # Trust real content signatures before declared MIME.
     if _looks_like_epub_archive(path):
         return ".epub"
     if _looks_like_comic_archive(path):
+        return ".cbz"
+
+    if "epub" in declared:
+        return ".epub"
+    if "comic" in declared or "cbz" in declared:
         return ".cbz"
 
     with path.open("rb") as handle:

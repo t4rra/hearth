@@ -5,3 +5,4 @@ __pycache__
 *.pyc
 TESTING FILES
 hearth/sync/mtpx_bridge/.build/hearth-mtpx-bridge
+KCC Options

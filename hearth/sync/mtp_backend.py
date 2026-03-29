@@ -40,6 +40,7 @@ class LibmtpCLIBackend:
         self._last_probe_ok = False
         self._last_probe_ts = 0.0
         self._sticky_seconds = 90.0
+        self._last_detect_info = ""
 
         self._list_cache: list[MTPRemoteFile] = []
         self._list_cache_ts = 0.0
@@ -76,9 +77,13 @@ class LibmtpCLIBackend:
             return False
 
         ok = bool(result.get("detected"))
+        self._last_detect_info = str(result.get("device_info", ""))
         self._last_probe_ok = ok
         self._last_probe_ts = now
         return ok
+
+    def detected_device_info(self) -> str:
+        return self._last_detect_info
 
     def list_files(self) -> list[MTPRemoteFile]:
         now = time.time()
@@ -160,14 +165,27 @@ class LibmtpCLIBackend:
         remote = self._find_file(name, allow_missing=True)
         if remote is None:
             return False
+
         if remote.is_dir:
-            return False
+            prefix = remote.path.rstrip("/") + "/"
+            children = [
+                entry for entry in self.list_files() if entry.path.startswith(prefix)
+            ]
+            children.sort(key=lambda entry: entry.path.count("/"), reverse=True)
+            for child in children:
+                self._rpc(
+                    "delete",
+                    {
+                        "path": child.path,
+                        "base_path": "/",
+                    },
+                )
 
         self._rpc(
             "delete",
             {
                 "path": remote.path,
-                "base_path": "/documents",
+                "base_path": "/",
             },
         )
         self._invalidate_list_cache()
@@ -210,7 +228,11 @@ class LibmtpCLIBackend:
                 continue
 
             for item in files:
-                if item.name == name or item.path == name:
+                query = name.strip("/")
+                item_path = item.path.strip("/")
+                if item.name == query or item_path == query:
+                    return item
+                if item_path.endswith("/" + query):
                     return item
             break
 
