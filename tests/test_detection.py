@@ -17,19 +17,13 @@ def test_infer_extension_for_real_epub(sample_epub_path: Path) -> None:
 def test_declared_type_wins_when_present(tmp_path: Path) -> None:
     payload = tmp_path / "book.bin"
     payload.write_bytes(b"nonsense")
-    assert (
-        infer_extension(payload, declared_type="application/epub+zip")
-        == ".epub"
-    )
+    assert infer_extension(payload, declared_type="application/epub+zip") == ".epub"
 
 
 def test_real_extension_wins_over_declared_type(tmp_path: Path) -> None:
     payload = tmp_path / "book.cbz"
     payload.write_bytes(b"not-a-real-cbz")
-    assert (
-        infer_extension(payload, declared_type="application/epub+zip")
-        == ".cbz"
-    )
+    assert infer_extension(payload, declared_type="application/epub+zip") == ".cbz"
 
 
 @pytest.mark.parametrize("suffix", [".cbr", ".cbz", ".cbt", ".cba", ".cb7"])
@@ -51,10 +45,7 @@ def test_comic_suffix_wins_over_declared_epub_type(
     payload = tmp_path / f"book{suffix}"
     payload.write_bytes(b"not-a-real-archive")
 
-    assert (
-        infer_extension(payload, declared_type="application/epub+zip")
-        == suffix
-    )
+    assert infer_extension(payload, declared_type="application/epub+zip") == suffix
 
 
 def test_missing_path_without_suffix_falls_back_to_bin(

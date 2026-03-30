@@ -99,9 +99,7 @@ class KindleDevice:
         if preferred == "mtp":
             backend = cls.mtp_backend()
             if not backend.available():
-                raise RuntimeError(
-                    "MTP backend is unavailable; install Go and libusb"
-                )
+                raise RuntimeError("MTP backend is unavailable; install Go and libusb")
             if not backend.detect_device():
                 raise RuntimeError("No MTP device detected")
             return cls(transport="mtp", root=Path("/mtp/kindle"))
@@ -155,7 +153,7 @@ class KindleDevice:
         if not folder_lower.startswith(stem_lower):
             return False
 
-        remainder = folder_stem[len(stem):]
+        remainder = folder_stem[len(stem) :]
         if not remainder:
             return True
         stripped_remainder = remainder.lstrip()
@@ -218,8 +216,7 @@ class KindleDevice:
                 mtp_companions = self._find_mtp_sdr_companions(remote_name)
                 for mtp_companion in mtp_companions:
                     deleted_sdr = (
-                        backend.delete_file_by_name(mtp_companion)
-                        or deleted_sdr
+                        backend.delete_file_by_name(mtp_companion) or deleted_sdr
                     )
                 return deleted or deleted_sdr
             except MTPBackendError as exc:
