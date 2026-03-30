@@ -206,7 +206,9 @@ class KCCConverter:
         if shim_dirs:
             current_path = env.get("PATH", "")
             prefix = ":".join(shim_dirs)
-            env["PATH"] = f"{prefix}:{current_path}" if current_path else prefix
+            env["PATH"] = (
+                f"{prefix}:{current_path}" if current_path else prefix
+            )
         return env
 
     def _ensure_7zz_shim(self) -> str:
@@ -237,15 +239,29 @@ class KCCConverter:
 
         candidates = [
             Path(
-                "/Applications/Kindle Previewer 3.app" "/Contents/lib/fc/bin/kindlegen"
+                "/Applications/Kindle Previewer 3.app"
+                "/Contents/lib/fc/bin/kindlegen"
             ),
-            Path("/Applications/Kindle Previewer.app" "/Contents/lib/fc/bin/kindlegen"),
-            Path("/Applications/Kindle Previewer 3.app/Contents/MacOS/kindlegen"),
-            Path("/Applications/Kindle Previewer.app/Contents/MacOS/kindlegen"),
+            Path(
+                "/Applications/Kindle Previewer.app"
+                "/Contents/lib/fc/bin/kindlegen"
+            ),
+            Path(
+                "/Applications/Kindle Previewer 3.app/Contents/MacOS/kindlegen"
+            ),
+            Path(
+                "/Applications/Kindle Previewer.app/Contents/MacOS/kindlegen"
+            ),
             Path.home()
-            / ("Applications/Kindle Previewer 3.app" "/Contents/lib/fc/bin/kindlegen"),
+            / (
+                "Applications/Kindle Previewer 3.app"
+                "/Contents/lib/fc/bin/kindlegen"
+            ),
             Path.home()
-            / ("Applications/Kindle Previewer.app" "/Contents/lib/fc/bin/kindlegen"),
+            / (
+                "Applications/Kindle Previewer.app"
+                "/Contents/lib/fc/bin/kindlegen"
+            ),
         ]
 
         for candidate in candidates:

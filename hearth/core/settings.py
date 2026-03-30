@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -26,6 +26,7 @@ class Settings:
     kcc_manga_force: bool = False
     kcc_autolevel: bool = True
     calibre_command: str = ""
+    collection_sync_feeds: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> "Settings":

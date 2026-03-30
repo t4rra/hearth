@@ -126,3 +126,31 @@ def test_download_staging_path_has_extension(
 
     assert converters.last_source is not None
     assert converters.last_source.suffix == ".epub"
+
+
+def test_pdf_files_are_transferred_directly(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF")
+    device = KindleDevice("usb", tmp_path / "device")
+    converters = FakeConverters()
+    manager = SyncManager(
+        session=FakeSession({"https://example.test/book.pdf": pdf_path}),
+        converters=converters,
+        device=device,
+        workspace=tmp_path / "workspace",
+    )
+
+    item = SyncItem(
+        id="book-pdf",
+        title="Book PDF",
+        download_url="https://example.test/book.pdf",
+        declared_type="application/pdf",
+    )
+
+    manager.sync([item])
+
+    # converter should not have been invoked
+    assert converters.last_source is None
+
+    remote_path = device.documents_dir / "Hearth" / "Book PDF.pdf"
+    assert remote_path.exists()

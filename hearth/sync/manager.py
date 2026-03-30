@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 import urllib.parse
+import shutil
 
 from hearth.converters.detection import COMIC_EXTENSIONS, infer_extension
 from hearth.core.opds import OPDSSession
@@ -207,16 +208,33 @@ class SyncManager:
                     is_log=True,
                 )
 
-            converted = self.converters.convert_for_kindle(
-                source=downloaded,
-                destination_dir=converted_dir,
-                stem=stem,
-                title=item.title,
-                author=item.author,
-                kcc_device_hint=detected_kcc_profile,
-                progress_callback=on_converter_progress,
-                declared_type=item.declared_type,
+            # If this item is a PDF, skip conversion and copy directly.
+            is_pdf = (detected_ext == ".pdf") or (
+                "pdf" in (item.declared_type or "").lower()
             )
+            if is_pdf:
+                converted_dir.mkdir(parents=True, exist_ok=True)
+                dest = converted_dir / f"{stem}.pdf"
+                shutil.copy2(downloaded, dest)
+
+                class _CopyResult:
+                    backend = "identity"
+
+                    def __init__(self, output: Path) -> None:
+                        self.output = output
+
+                converted = _CopyResult(dest)
+            else:
+                converted = self.converters.convert_for_kindle(
+                    source=downloaded,
+                    destination_dir=converted_dir,
+                    stem=stem,
+                    title=item.title,
+                    author=item.author,
+                    kcc_device_hint=detected_kcc_profile,
+                    progress_callback=on_converter_progress,
+                    declared_type=item.declared_type,
+                )
             emit(
                 processed,
                 f"converted via {converted.backend}: {converted.output.name} "

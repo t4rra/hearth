@@ -44,16 +44,40 @@ class OPDSSession:
     def __init__(self, settings: Settings):
         self.settings = settings
 
+    def resolve_url(self, url: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme:
+            if parsed.scheme in {"http", "https"}:
+                return url
+            raise ValueError(
+                "Unsupported URL scheme for OPDS request: "
+                f"{parsed.scheme!r} (url={url!r})"
+            )
+
+        base = self.settings.opds_url.strip()
+        if base:
+            resolved = urllib.parse.urljoin(base, url)
+            resolved_parsed = urllib.parse.urlparse(resolved)
+            if resolved_parsed.scheme in {"http", "https"}:
+                return resolved
+            raise ValueError(
+                "Resolved OPDS URL is not an HTTP(S) URL "
+                f"(base={base!r}, url={url!r}, resolved={resolved!r})"
+            )
+
+        raise ValueError("OPDS URL is relative but no base OPDS feed URL is configured")
+
     def _request(self, url: str) -> urllib.request.Request:
         headers = self.settings.auth_headers().copy()
         return urllib.request.Request(url=url, headers=headers)
 
     def open_bytes(self, url: str) -> bytes:
-        req = self._request(url)
+        resolved_url = self.resolve_url(url)
+        req = self._request(resolved_url)
         creds = self.settings.basic_auth_credentials()
         if creds:
             manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-            manager.add_password(None, url, creds[0], creds[1])
+            manager.add_password(None, resolved_url, creds[0], creds[1])
             opener = urllib.request.build_opener(
                 urllib.request.HTTPBasicAuthHandler(manager)
             )

@@ -58,6 +58,11 @@ def infer_extension(path: Path, declared_type: str = "") -> str:
     if "comic" in declared or "cbz" in declared:
         return ".cbz"
 
+    # Some call sites infer from URL-derived names before the file exists.
+    # Fall back to suffix/bin instead of attempting to read a missing path.
+    if not path.exists():
+        return suffix or ".bin"
+
     with path.open("rb") as handle:
         head = handle.read(8)
     if head.startswith(b"PK"):

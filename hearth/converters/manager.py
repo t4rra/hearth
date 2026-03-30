@@ -77,7 +77,8 @@ class ConverterManager:
         if ext in {".epub", ".zip", ".pdf"}:
             if not self.calibre.available():
                 raise RuntimeError(
-                    "Calibre ebook-convert is required " "for EPUB/ZIP/PDF conversion"
+                    "Calibre ebook-convert is required "
+                    "for EPUB/ZIP/PDF conversion"
                 )
             output = destination_dir / f"{stem}.mobi"
             converted = self.calibre.convert(

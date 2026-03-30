@@ -51,3 +51,32 @@ def test_delete_folder_removes_nested_tree(tmp_path: Path) -> None:
 
     assert device.delete_file("Hearth") is True
     assert not (device.documents_dir / "Hearth").exists()
+
+
+def test_delete_file_removes_matching_sdr_folder(tmp_path: Path) -> None:
+    device = KindleDevice(transport="usb", root=tmp_path / "kindle")
+    book = device.documents_dir / "Hearth" / "Book One.epub"
+    sdr = device.documents_dir / "Hearth" / "Book One.sdr"
+    book.parent.mkdir(parents=True, exist_ok=True)
+    book.write_text("payload", encoding="utf-8")
+    sdr.mkdir(parents=True, exist_ok=True)
+
+    assert device.delete_file("Hearth/Book One.epub") is True
+    assert not book.exists()
+    assert not sdr.exists()
+
+
+def test_delete_file_removes_sdr_folder_with_suffix(tmp_path: Path) -> None:
+    device = KindleDevice(transport="usb", root=tmp_path / "kindle")
+    book = device.documents_dir / "Hearth" / "Book One.epub"
+    sdr = device.documents_dir / "Hearth" / "Book One - ASIN123.sdr"
+    other = device.documents_dir / "Hearth" / "Book One Hundred.sdr"
+    book.parent.mkdir(parents=True, exist_ok=True)
+    book.write_text("payload", encoding="utf-8")
+    sdr.mkdir(parents=True, exist_ok=True)
+    other.mkdir(parents=True, exist_ok=True)
+
+    assert device.delete_file("Hearth/Book One.epub") is True
+    assert not book.exists()
+    assert not sdr.exists()
+    assert other.exists()

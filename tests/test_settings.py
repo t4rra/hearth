@@ -10,6 +10,7 @@ def test_settings_roundtrip(tmp_path: Path) -> None:
         opds_url="https://example.test/opds",
         auth_mode="bearer",
         auth_bearer_token="token",
+        collection_sync_feeds=["https://example.test/opds/series-a"],
     )
     path = tmp_path / "settings.json"
 
@@ -18,6 +19,7 @@ def test_settings_roundtrip(tmp_path: Path) -> None:
 
     assert loaded.opds_url == "https://example.test/opds"
     assert loaded.auth_headers() == {"Authorization": "Bearer token"}
+    assert loaded.collection_sync_feeds == ["https://example.test/opds/series-a"]
 
 
 def test_sanitize_filename_replaces_illegal_chars() -> None:

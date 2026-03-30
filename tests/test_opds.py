@@ -79,3 +79,40 @@ def test_auth_configuration_is_session_wide() -> None:
     settings = Settings(auth_mode="bearer", auth_bearer_token="abc")
     session = OPDSSession(settings)
     assert session.settings.auth_headers() == {"Authorization": "Bearer abc"}
+
+
+def test_session_resolves_relative_url_against_opds_base() -> None:
+    settings = Settings(opds_url="https://example.test/opds/root.xml")
+    session = OPDSSession(settings)
+    assert session.resolve_url("download") == "https://example.test/opds/download"
+
+
+def test_session_rejects_relative_url_without_base() -> None:
+    session = OPDSSession(Settings())
+    try:
+        session.resolve_url("download")
+    except ValueError as exc:
+        assert "relative" in str(exc).lower()
+    else:
+        raise AssertionError("Expected ValueError for relative URL without base")
+
+
+def test_session_rejects_non_http_scheme() -> None:
+    session = OPDSSession(Settings(opds_url="https://example.test/opds/root.xml"))
+    try:
+        session.resolve_url("ftp://example.test/book.epub")
+    except ValueError as exc:
+        assert "scheme" in str(exc).lower()
+    else:
+        raise AssertionError("Expected ValueError for non-http URL scheme")
+
+
+def test_session_rejects_non_network_resolution() -> None:
+    session = OPDSSession(Settings(opds_url="download"))
+    try:
+        session.resolve_url("book.epub")
+    except ValueError as exc:
+        assert "not an http" in str(exc).lower()
+        assert "resolved" in str(exc).lower()
+    else:
+        raise AssertionError("Expected ValueError for non-network resolved URL")
