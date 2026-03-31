@@ -7,10 +7,14 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from xml.etree import ElementTree
 from typing import Callable
 import os
 import zipfile
+
+
+_BOOTSTRAP_LOCK = threading.Lock()
 
 
 @dataclass(slots=True)
@@ -120,57 +124,58 @@ class KCCConverter:
         )
 
     def _bootstrap_repo_command(self, script: Path) -> bool:
-        git = shutil.which("git")
-        if not git:
-            return False
+        with _BOOTSTRAP_LOCK:
+            git = shutil.which("git")
+            if not git:
+                return False
 
-        self.repo_dir.parent.mkdir(parents=True, exist_ok=True)
+            self.repo_dir.parent.mkdir(parents=True, exist_ok=True)
 
-        if not self.repo_dir.exists():
+            if not self.repo_dir.exists():
+                try:
+                    clone = subprocess.run(
+                        [
+                            git,
+                            "clone",
+                            "--depth",
+                            "1",
+                            self.REPO_URL,
+                            str(self.repo_dir),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=90,
+                        check=False,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    return False
+                if clone.returncode != 0:
+                    return False
+
+            if not script.exists():
+                return False
+
+            # Best effort dependency bootstrap for running from source checkout.
             try:
-                clone = subprocess.run(
+                install = subprocess.run(
                     [
-                        git,
-                        "clone",
-                        "--depth",
-                        "1",
-                        self.REPO_URL,
+                        sys.executable,
+                        "-m",
+                        "pip",
+                        "install",
+                        "-q",
+                        "-e",
                         str(self.repo_dir),
                     ],
                     capture_output=True,
                     text=True,
-                    timeout=90,
+                    timeout=180,
                     check=False,
                 )
             except (OSError, subprocess.SubprocessError):
                 return False
-            if clone.returncode != 0:
-                return False
 
-        if not script.exists():
-            return False
-
-        # Best effort dependency bootstrap for running from source checkout.
-        try:
-            install = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "pip",
-                    "install",
-                    "-q",
-                    "-e",
-                    str(self.repo_dir),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=180,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return False
-
-        return install.returncode == 0
+            return install.returncode == 0
 
     def available(self) -> bool:
         return self._discover_invocation() is not None
@@ -206,9 +211,7 @@ class KCCConverter:
         if shim_dirs:
             current_path = env.get("PATH", "")
             prefix = ":".join(shim_dirs)
-            env["PATH"] = (
-                f"{prefix}:{current_path}" if current_path else prefix
-            )
+            env["PATH"] = f"{prefix}:{current_path}" if current_path else prefix
         return env
 
     def _ensure_7zz_shim(self) -> str:
@@ -239,29 +242,15 @@ class KCCConverter:
 
         candidates = [
             Path(
-                "/Applications/Kindle Previewer 3.app"
-                "/Contents/lib/fc/bin/kindlegen"
+                "/Applications/Kindle Previewer 3.app" "/Contents/lib/fc/bin/kindlegen"
             ),
-            Path(
-                "/Applications/Kindle Previewer.app"
-                "/Contents/lib/fc/bin/kindlegen"
-            ),
-            Path(
-                "/Applications/Kindle Previewer 3.app/Contents/MacOS/kindlegen"
-            ),
-            Path(
-                "/Applications/Kindle Previewer.app/Contents/MacOS/kindlegen"
-            ),
+            Path("/Applications/Kindle Previewer.app" "/Contents/lib/fc/bin/kindlegen"),
+            Path("/Applications/Kindle Previewer 3.app/Contents/MacOS/kindlegen"),
+            Path("/Applications/Kindle Previewer.app/Contents/MacOS/kindlegen"),
             Path.home()
-            / (
-                "Applications/Kindle Previewer 3.app"
-                "/Contents/lib/fc/bin/kindlegen"
-            ),
+            / ("Applications/Kindle Previewer 3.app" "/Contents/lib/fc/bin/kindlegen"),
             Path.home()
-            / (
-                "Applications/Kindle Previewer.app"
-                "/Contents/lib/fc/bin/kindlegen"
-            ),
+            / ("Applications/Kindle Previewer.app" "/Contents/lib/fc/bin/kindlegen"),
         ]
 
         for candidate in candidates:

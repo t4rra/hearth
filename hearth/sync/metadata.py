@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, fields
 import json
 from pathlib import Path
 
@@ -12,6 +12,7 @@ class SyncRecord:
     desired: bool
     on_device: bool
     device_filename: str
+    collection_feeds: list[str] = field(default_factory=list)
 
 
 def load_metadata(path: Path) -> dict[str, SyncRecord]:
@@ -19,8 +20,12 @@ def load_metadata(path: Path) -> dict[str, SyncRecord]:
         return {}
     raw = json.loads(path.read_text(encoding="utf-8"))
     result: dict[str, SyncRecord] = {}
+    allowed = {item.name for item in fields(SyncRecord)}
     for key, value in raw.items():
-        result[key] = SyncRecord(**value)
+        if not isinstance(value, dict):
+            continue
+        filtered = {k: v for k, v in value.items() if k in allowed}
+        result[key] = SyncRecord(**filtered)
     return result
 
 
@@ -42,6 +47,7 @@ def reconcile_on_device(
             desired=record.desired,
             on_device=record.device_filename in device_files,
             device_filename=record.device_filename,
+            collection_feeds=list(record.collection_feeds),
         )
     return reconciled
 
@@ -53,12 +59,19 @@ def upsert_record(
     desired: bool,
     on_device: bool,
     device_filename: str,
+    collection_feeds: list[str] | None = None,
 ) -> dict[str, SyncRecord]:
+    previous = records.get(book_id)
     records[book_id] = SyncRecord(
         id=book_id,
         title=title,
         desired=desired,
         on_device=on_device,
         device_filename=device_filename,
+        collection_feeds=(
+            list(collection_feeds)
+            if collection_feeds is not None
+            else list(previous.collection_feeds) if previous is not None else []
+        ),
     )
     return records

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import concurrent.futures
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
 import urllib.parse
@@ -27,6 +28,7 @@ class SyncItem:
     download_url: str
     declared_type: str
     author: str = ""
+    source_feeds: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -41,6 +43,23 @@ class SyncProgress:
     total: int
     message: str
     is_log: bool = False
+
+
+@dataclass(slots=True)
+class PreparedSyncItem:
+    order: int
+    item: SyncItem
+    stem: str
+    downloaded: Path
+    detected_ext: str
+    detected_kcc_profile: str
+
+
+@dataclass(slots=True)
+class ConvertedSyncItem:
+    prepared: PreparedSyncItem
+    backend: str
+    output: Path
 
 
 class ConverterLike(Protocol):
@@ -64,11 +83,13 @@ class SyncManager:
         converters: ConverterLike,
         device: KindleDevice,
         workspace: Path,
+        max_conversion_workers: int = 1,
     ):
         self.session = session
         self.converters = converters
         self.device = device
         self.workspace = workspace
+        self.max_conversion_workers = max(1, int(max_conversion_workers))
 
     @property
     def metadata_path(self) -> Path:
@@ -122,11 +143,10 @@ class SyncManager:
             on_device_names,
         )
         downloads_dir = self.workspace / "downloads"
-        converted_dir = self.workspace / "converted"
         outcome = SyncOutcome()
-        processed = 0
+        prepared_items: list[PreparedSyncItem] = []
 
-        for item in items:
+        for order, item in enumerate(items, start=1):
             existing = records.get(item.id)
             if (
                 existing
@@ -135,10 +155,9 @@ class SyncManager:
                 and not force_resync
             ):
                 outcome.skipped += 1
-                processed += 1
                 emit(
-                    processed,
-                    f"[{processed}/{len(items)}] skipped: {item.title}",
+                    order,
+                    f"[{order}/{len(items)}] skipped: {item.title}",
                     is_log=True,
                 )
                 continue
@@ -146,8 +165,8 @@ class SyncManager:
             stem = sanitize_filename(item.title)
             source_path = downloads_dir / self._download_filename(stem, item)
             emit(
-                processed,
-                f"[{processed + 1}/{len(items)}] downloading: {item.title}",
+                (order - 1) + 0.02,
+                f"[{order}/{len(items)}] downloading: {item.title}",
                 is_log=True,
             )
             downloaded = self.session.download_to(
@@ -159,17 +178,11 @@ class SyncManager:
                 declared_type=item.declared_type,
             )
             emit(
-                processed,
+                (order - 1) + 0.25,
                 (
                     f"downloaded {downloaded.name} "
                     f"({downloaded.stat().st_size} bytes)"
                 ),
-                is_log=True,
-            )
-
-            emit(
-                processed,
-                f"[{processed + 1}/{len(items)}] converting: {item.title}",
                 is_log=True,
             )
 
@@ -178,73 +191,73 @@ class SyncManager:
                 detected_kcc_profile = self._detect_kcc_device_profile()
             if detected_kcc_profile:
                 emit(
-                    processed,
+                    order - 1,
                     ("auto-detected KCC device profile: " f"{detected_kcc_profile}"),
                     is_log=True,
                 )
 
-            item_title = item.title
-            item_index = processed + 1
-            total_items = len(items)
-
-            def on_converter_progress(
-                percent: float | None,
-                line: str,
-                _item_index: int = item_index,
-                _total_items: int = total_items,
-                _item_title: str = item_title,
-            ) -> None:
-                if percent is not None:
-                    emit(
-                        processed + (percent / 100.0),
-                        (
-                            f"[{_item_index}/{_total_items}] converting "
-                            f"{_item_title}: {percent:.0f}%"
-                        ),
-                    )
-                emit(
-                    processed,
-                    f"converter: {line}",
-                    is_log=True,
-                )
-
-            # If this item is a PDF, skip conversion and copy directly.
-            is_pdf = (detected_ext == ".pdf") or (
-                "pdf" in (item.declared_type or "").lower()
-            )
-            if is_pdf:
-                converted_dir.mkdir(parents=True, exist_ok=True)
-                dest = converted_dir / f"{stem}.pdf"
-                shutil.copy2(downloaded, dest)
-
-                class _CopyResult:
-                    backend = "identity"
-
-                    def __init__(self, output: Path) -> None:
-                        self.output = output
-
-                converted = _CopyResult(dest)
-            else:
-                converted = self.converters.convert_for_kindle(
-                    source=downloaded,
-                    destination_dir=converted_dir,
+            prepared_items.append(
+                PreparedSyncItem(
+                    order=order,
+                    item=item,
                     stem=stem,
-                    title=item.title,
-                    author=item.author,
-                    kcc_device_hint=detected_kcc_profile,
-                    progress_callback=on_converter_progress,
-                    declared_type=item.declared_type,
+                    downloaded=downloaded,
+                    detected_ext=detected_ext,
+                    detected_kcc_profile=detected_kcc_profile,
                 )
+            )
+
+        if prepared_items:
             emit(
-                processed,
+                0,
+                (
+                    "starting conversion phase with "
+                    f"{self.max_conversion_workers} worker(s)"
+                ),
+                is_log=True,
+            )
+
+        converted_items: list[ConvertedSyncItem] = []
+        if self.max_conversion_workers == 1:
+            for prepared in prepared_items:
+                converted_items.append(
+                    self._convert_item(
+                        prepared=prepared,
+                        emit=emit,
+                        total_items=len(items),
+                    )
+                )
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.max_conversion_workers
+            ) as pool:
+                futures = [
+                    pool.submit(
+                        self._convert_item,
+                        prepared,
+                        emit,
+                        len(items),
+                    )
+                    for prepared in prepared_items
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    converted_items.append(future.result())
+
+        converted_items.sort(key=lambda value: value.prepared.order)
+
+        for converted in converted_items:
+            item = converted.prepared.item
+            order = converted.prepared.order
+            emit(
+                (order - 1) + 0.90,
                 f"converted via {converted.backend}: {converted.output.name} "
                 f"({converted.output.stat().st_size} bytes)",
                 is_log=True,
             )
             remote_name = f"Hearth/{converted.output.name}"
             emit(
-                processed,
-                f"[{processed + 1}/{len(items)}] uploading: {remote_name}",
+                (order - 1) + 0.95,
+                f"[{order}/{len(items)}] uploading: {remote_name}",
                 is_log=True,
             )
             self.device.put_file(converted.output, remote_name)
@@ -256,12 +269,12 @@ class SyncManager:
                 desired=True,
                 on_device=True,
                 device_filename=remote_name,
+                collection_feeds=item.source_feeds,
             )
             outcome.synced += 1
-            processed += 1
             emit(
-                processed,
-                f"[{processed}/{len(items)}] synced: {item.title}",
+                order,
+                f"[{order}/{len(items)}] synced: {item.title}",
                 is_log=True,
             )
 
@@ -272,6 +285,76 @@ class SyncManager:
             is_log=True,
         )
         return outcome
+
+    def _convert_item(
+        self,
+        prepared: PreparedSyncItem,
+        emit: Callable[[float, str, bool], None],
+        total_items: int,
+    ) -> ConvertedSyncItem:
+        item = prepared.item
+        order = prepared.order
+        converted_dir = self.workspace / "converted"
+
+        emit(
+            (order - 1) + 0.30,
+            f"[{order}/{total_items}] converting: {item.title}",
+            True,
+        )
+
+        def on_converter_progress(
+            percent: float | None,
+            line: str,
+            _order: int = order,
+            _total_items: int = total_items,
+            _title: str = item.title,
+        ) -> None:
+            if percent is not None:
+                emit(
+                    (_order - 1) + 0.30 + ((percent / 100.0) * 0.55),
+                    f"[{_order}/{_total_items}] converting {_title}: {percent:.0f}%",
+                    False,
+                )
+            emit(
+                _order - 1,
+                f"converter: {line}",
+                True,
+            )
+
+        # If this item is a PDF, skip conversion and copy directly.
+        is_pdf = (prepared.detected_ext == ".pdf") or (
+            "pdf" in (item.declared_type or "").lower()
+        )
+        if is_pdf:
+            converted_dir.mkdir(parents=True, exist_ok=True)
+            dest = converted_dir / f"{prepared.stem}.pdf"
+            shutil.copy2(prepared.downloaded, dest)
+            emit(
+                (order - 1) + 0.75,
+                f"copied PDF without conversion: {dest.name}",
+                True,
+            )
+            return ConvertedSyncItem(
+                prepared=prepared,
+                backend="identity",
+                output=dest,
+            )
+
+        converted = self.converters.convert_for_kindle(
+            source=prepared.downloaded,
+            destination_dir=converted_dir,
+            stem=prepared.stem,
+            title=item.title,
+            author=item.author,
+            kcc_device_hint=prepared.detected_kcc_profile,
+            progress_callback=on_converter_progress,
+            declared_type=item.declared_type,
+        )
+        return ConvertedSyncItem(
+            prepared=prepared,
+            backend=converted.backend,
+            output=converted.output,
+        )
 
     def _detect_kcc_device_profile(self) -> str:
         if self.device.transport != "mtp":
@@ -314,12 +397,16 @@ class SyncManager:
         if not record:
             return False
         deleted = self.device.delete_file(record.device_filename)
-        records[record_id] = SyncRecord(
-            id=record.id,
-            title=record.title,
-            desired=False,
-            on_device=False,
-            device_filename=record.device_filename,
-        )
+        if deleted:
+            records.pop(record_id, None)
+        else:
+            records[record_id] = SyncRecord(
+                id=record.id,
+                title=record.title,
+                desired=False,
+                on_device=False,
+                device_filename=record.device_filename,
+                collection_feeds=list(record.collection_feeds),
+            )
         save_metadata(self.metadata_path, records)
         return deleted

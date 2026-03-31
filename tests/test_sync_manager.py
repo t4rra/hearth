@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import threading
+import time
 
 from hearth.core.opds import OPDSSession
 from hearth.core.settings import Settings
 from hearth.sync.device import KindleDevice
 from hearth.sync.manager import SyncItem, SyncManager
+from hearth.sync.metadata import load_metadata
 
 
 class FakeSession(OPDSSession):
@@ -48,6 +51,47 @@ class FakeConverters:
         output = destination_dir / f"{stem}.epub"
         output.write_bytes(source.read_bytes())
         return FakeConversionResult(backend="fake", output=output)
+
+
+class SlowConverters(FakeConverters):
+    def __init__(self, delay_seconds: float = 0.15) -> None:
+        super().__init__()
+        self.delay_seconds = delay_seconds
+        self._lock = threading.Lock()
+        self.max_active = 0
+        self._active = 0
+
+    def convert_for_kindle(
+        self,
+        source: Path,
+        destination_dir: Path,
+        stem: str,
+        title: str = "",
+        author: str = "",
+        kcc_device_hint: str = "",
+        progress_callback=None,
+        declared_type: str = "",
+    ) -> FakeConversionResult:
+        _ = (title, author, kcc_device_hint, progress_callback, declared_type)
+        with self._lock:
+            self._active += 1
+            if self._active > self.max_active:
+                self.max_active = self._active
+        try:
+            time.sleep(self.delay_seconds)
+            return super().convert_for_kindle(
+                source=source,
+                destination_dir=destination_dir,
+                stem=stem,
+                title=title,
+                author=author,
+                kcc_device_hint=kcc_device_hint,
+                progress_callback=progress_callback,
+                declared_type=declared_type,
+            )
+        finally:
+            with self._lock:
+                self._active -= 1
 
 
 def test_sync_is_idempotent(tmp_path: Path, sample_epub_path: Path) -> None:
@@ -154,3 +198,63 @@ def test_pdf_files_are_transferred_directly(tmp_path: Path) -> None:
 
     remote_path = device.documents_dir / "Hearth" / "Book PDF.pdf"
     assert remote_path.exists()
+
+
+def test_sync_can_convert_in_parallel(tmp_path: Path, sample_epub_path: Path) -> None:
+    converters = SlowConverters()
+    manager = SyncManager(
+        session=FakeSession(
+            {
+                "https://example.test/book-1.epub": sample_epub_path,
+                "https://example.test/book-2.epub": sample_epub_path,
+            }
+        ),
+        converters=converters,
+        device=KindleDevice("usb", tmp_path / "device"),
+        workspace=tmp_path / "workspace",
+        max_conversion_workers=2,
+    )
+
+    manager.sync(
+        [
+            SyncItem(
+                id="book-1",
+                title="Book One",
+                download_url="https://example.test/book-1.epub",
+                declared_type="application/epub+zip",
+            ),
+            SyncItem(
+                id="book-2",
+                title="Book Two",
+                download_url="https://example.test/book-2.epub",
+                declared_type="application/epub+zip",
+            ),
+        ]
+    )
+
+    assert converters.max_active >= 2
+
+
+def test_mark_deleted_removes_record_on_success(
+    tmp_path: Path,
+    sample_epub_path: Path,
+) -> None:
+    device = KindleDevice("usb", tmp_path / "device")
+    manager = SyncManager(
+        session=FakeSession({"https://example.test/book.epub": sample_epub_path}),
+        converters=FakeConverters(),
+        device=device,
+        workspace=tmp_path / "workspace",
+    )
+    item = SyncItem(
+        id="book-1",
+        title="Book One",
+        download_url="https://example.test/book.epub",
+        declared_type="application/epub+zip",
+    )
+
+    manager.sync([item])
+
+    assert manager.mark_deleted_on_device("book-1") is True
+    records = load_metadata(manager.metadata_path)
+    assert "book-1" not in records

@@ -26,6 +26,7 @@ class Settings:
     kcc_manga_force: bool = False
     kcc_autolevel: bool = True
     calibre_command: str = ""
+    max_conversion_workers: int = 1
     collection_sync_feeds: list[str] = field(default_factory=list)
 
     @classmethod

@@ -69,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         converters=converters,
         device=device,
         workspace=Path(args.workspace),
+        max_conversion_workers=settings.max_conversion_workers,
     )
 
     items = _discover_items(client, feed_url)
