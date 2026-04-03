@@ -667,7 +667,9 @@ class KCCConverter:
 
         if self._is_transient_failure(last_error):
             if progress_callback is not None:
-                progress_callback(None, "[KCC] Transient conversion failure; retrying once")
+                progress_callback(
+                    None, "[KCC] Transient conversion failure; retrying once"
+                )
             time.sleep(0.35)
             retry_ok, retry_error = self._run_conversion_attempts(
                 command=command,

@@ -360,9 +360,7 @@ class SyncManager:
                     desired=True,
                     on_device=previous.on_device if previous is not None else False,
                     device_filename=(
-                        previous.device_filename
-                        if previous is not None
-                        else ""
+                        previous.device_filename if previous is not None else ""
                     ),
                     collection_feeds=item.source_feeds,
                 )
