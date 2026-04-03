@@ -711,7 +711,9 @@ class HearthMainWindow(QMainWindow):
                 records = load_metadata(temp_path)
 
         try:
-            device_files = {entry.path for entry in device.list_files() if not entry.is_dir}
+            device_files = {
+                entry.path for entry in device.list_files() if not entry.is_dir
+            }
         except (OSError, RuntimeError):
             return records
         return merge_device_files_into_records(records, device_files)

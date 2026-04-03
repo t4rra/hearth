@@ -89,7 +89,9 @@ def test_merge_device_files_adds_missing_hearth_records() -> None:
     merged = merge_device_files_into_records(records, device_files)
 
     book_records = [
-        record for record in merged.values() if record.device_filename == "Hearth/Book One.epub"
+        record
+        for record in merged.values()
+        if record.device_filename == "Hearth/Book One.epub"
     ]
     assert len(book_records) == 1
     assert book_records[0].desired is True

@@ -108,9 +108,7 @@ class SyncManager:
             records = load_metadata(self.metadata_path)
             try:
                 device_files = {
-                    entry.path
-                    for entry in self.device.list_files()
-                    if not entry.is_dir
+                    entry.path for entry in self.device.list_files() if not entry.is_dir
                 }
             except (OSError, RuntimeError):
                 return records
@@ -402,9 +400,7 @@ class SyncManager:
                     desired=True,
                     on_device=previous.on_device if previous is not None else False,
                     device_filename=(
-                        previous.device_filename
-                        if previous is not None
-                        else ""
+                        previous.device_filename if previous is not None else ""
                     ),
                     collection_feeds=item.source_feeds,
                 )
