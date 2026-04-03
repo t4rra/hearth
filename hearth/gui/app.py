@@ -16,6 +16,7 @@ from PyQt6.QtCore import QTimer, Qt  # type: ignore[import-not-found]
 from PyQt6.QtGui import QBrush, QColor, QPalette, QIcon, QFont  # type: ignore[import-not-found]
 from PyQt6.QtWidgets import (
     QApplication,
+    QMenu,
     QCheckBox,
     QComboBox,
     QGridLayout,
@@ -158,6 +159,7 @@ class HearthMainWindow(QMainWindow):
         self.device_files: set[str] = set()
         self.device_on_book_ids: set[str] = set()
         self.pending_book_actions: dict[str, Literal["add", "remove"]] = {}
+        self.force_resync_book_ids: set[str] = set()
         self.collection_sync_feeds: set[str] = set()
         self._updating_library_widgets = False
         self._updating_collection_widgets = False
@@ -261,10 +263,14 @@ class HearthMainWindow(QMainWindow):
         self.library_table.setHorizontalHeaderLabels(
             ["", "Title", "Author", "Type", "Status"]
         )
+        self.library_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
         self.kindle_files_tree = QTreeWidget()
         self.kindle_files_tree.setColumnCount(3)
         self.kindle_files_tree.setHeaderLabels(["Name", "Type", "Size"])
+        self.kindle_files_tree.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
 
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
@@ -533,6 +539,9 @@ class HearthMainWindow(QMainWindow):
         self.collections_tree.itemCollapsed.connect(self._on_collection_collapsed)
         self.collections_tree.itemChanged.connect(self._on_collection_item_changed)
         self.library_table.itemChanged.connect(self._on_library_item_changed)
+        self.library_table.customContextMenuRequested.connect(
+            self._show_library_context_menu
+        )
 
         self.refresh_files_button.clicked.connect(self._refresh_kindle_files)
         self.download_selected_file_button.clicked.connect(
@@ -540,6 +549,9 @@ class HearthMainWindow(QMainWindow):
         )
         self.delete_selected_file_button.clicked.connect(
             self._delete_selected_kindle_files
+        )
+        self.kindle_files_tree.customContextMenuRequested.connect(
+            self._show_kindle_files_context_menu
         )
 
         self.reset_general_button.clicked.connect(self._reset_general)
@@ -1742,6 +1754,8 @@ class HearthMainWindow(QMainWindow):
     ) -> tuple[str, Qt.CheckState, Literal["add", "remove"] | None]:
         force_resync = self.force_checkbox.isChecked()
         action = self.pending_book_actions.get(row.id)
+        if row.id in self.force_resync_book_ids:
+            return ("Will Re-sync on Sync", Qt.CheckState.PartiallyChecked, "add")
         if action == "add":
             return ("Will Add on Sync", Qt.CheckState.PartiallyChecked, "add")
         if action == "remove":
@@ -2076,10 +2090,13 @@ class HearthMainWindow(QMainWindow):
         previous = item.data(Qt.ItemDataRole.UserRole + 2)
         if previous == "on_device":
             self.pending_book_actions[book_id] = "remove"
+            self.force_resync_book_ids.discard(book_id)
         elif previous == "off_device":
             self.pending_book_actions[book_id] = "add"
+            self.force_resync_book_ids.discard(book_id)
         else:
             self.pending_book_actions.pop(book_id, None)
+            self.force_resync_book_ids.discard(book_id)
 
         current = self.collections_tree.currentItem()
         if current is not None:
@@ -2096,6 +2113,136 @@ class HearthMainWindow(QMainWindow):
                 while parent_feed:
                     self._refresh_collection_visual(parent_feed)
                     parent_feed = self.feed_parent.get(parent_feed)
+
+    def _selected_library_book_id(self) -> str | None:
+        row_idx = self.library_table.currentRow()
+        if row_idx < 0:
+            return None
+        payload_item = self.library_table.item(row_idx, 0)
+        if payload_item is None:
+            return None
+        payload = payload_item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(payload, dict):
+            return None
+        book_id = payload.get("id")
+        if not isinstance(book_id, str) or not book_id:
+            return None
+        return book_id
+
+    def _refresh_current_library_view(self) -> None:
+        current = self.collections_tree.currentItem()
+        if current is None:
+            return
+        feed_url = current.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(feed_url, str):
+            return
+        self._populate_library_table(
+            self._books_for_feed_subtree(feed_url),
+            allow_book_toggles=self._should_allow_book_toggles(feed_url),
+        )
+        self._refresh_collection_visual(feed_url)
+        parent_feed = self.feed_parent.get(feed_url)
+        while parent_feed:
+            self._refresh_collection_visual(parent_feed)
+            parent_feed = self.feed_parent.get(parent_feed)
+
+    def _queue_book_add_on_sync(self, book_id: str) -> None:
+        self.force_resync_book_ids.discard(book_id)
+        self.pending_book_actions[book_id] = "add"
+
+    def _queue_book_delete_on_sync(self, book_id: str) -> None:
+        self.force_resync_book_ids.discard(book_id)
+        self.pending_book_actions[book_id] = "remove"
+
+    def _queue_book_force_resync(self, book_id: str) -> None:
+        self.pending_book_actions.pop(book_id, None)
+        self.force_resync_book_ids.add(book_id)
+
+    def _show_library_context_menu(self, pos) -> None:
+        if self.is_busy:
+            return
+        item = self.library_table.itemAt(pos)
+        if item is None:
+            return
+
+        row_idx = item.row()
+        if row_idx < 0:
+            return
+        self.library_table.selectRow(row_idx)
+
+        book_id = self._selected_library_book_id()
+        if book_id is None:
+            return
+        row = self.book_rows_by_id.get(book_id)
+        if row is None:
+            payload_item = self.library_table.item(row_idx, 0)
+            if payload_item is None:
+                return
+            payload = payload_item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(payload, dict):
+                return
+            row = LibraryRow(
+                id=book_id,
+                title=str(payload.get("title", "")),
+                author=str(payload.get("author", "")),
+                download_url=str(payload.get("download_url", "")),
+                declared_type=str(payload.get("declared_type", "")),
+                source_feed="",
+                deleted_from_server=False,
+            )
+
+        menu = QMenu(self)
+        has_download = bool(row.download_url) and not row.deleted_from_server
+        on_device = book_id in self.device_on_book_ids
+        pending_action = self.pending_book_actions.get(book_id)
+        is_resync = book_id in self.force_resync_book_ids
+
+        if has_download and (on_device or pending_action == "add" or is_resync):
+            force_resync_action = menu.addAction("Force Re-sync on Sync")
+            force_resync_action.triggered.connect(
+                lambda _checked=False, bid=book_id: (
+                    self._queue_book_force_resync(bid),
+                    self._refresh_current_library_view(),
+                )
+            )
+
+        if (
+            has_download
+            and not on_device
+            and not is_resync
+            and pending_action != "add"
+        ):
+            add_action = menu.addAction("Add on Sync")
+            add_action.triggered.connect(
+                lambda _checked=False, bid=book_id: (
+                    self._queue_book_add_on_sync(bid),
+                    self._refresh_current_library_view(),
+                )
+            )
+
+        if on_device and pending_action != "remove":
+            delete_action = menu.addAction("Delete on Sync")
+            delete_action.triggered.connect(
+                lambda _checked=False, bid=book_id: (
+                    self._queue_book_delete_on_sync(bid),
+                    self._refresh_current_library_view(),
+                )
+            )
+
+        if pending_action is not None or is_resync:
+            clear_action = menu.addAction("Clear Pending Action")
+            clear_action.triggered.connect(
+                lambda _checked=False, bid=book_id: (
+                    self.pending_book_actions.pop(bid, None),
+                    self.force_resync_book_ids.discard(bid),
+                    self._refresh_current_library_view(),
+                )
+            )
+
+        if menu.isEmpty():
+            return
+
+        menu.exec(self.library_table.viewport().mapToGlobal(pos))
 
     def _on_collection_item_changed(
         self,
@@ -2231,6 +2378,8 @@ class HearthMainWindow(QMainWindow):
             return
 
         self.collection_sync_feeds.add(feed_url)
+        for row in self._books_for_feed_subtree(feed_url):
+            self.force_resync_book_ids.discard(row.id)
         self._queue_adds_for_feed(feed_url)
         self._queue_removals_for_feed(feed_url)
         self._save_settings_to_file()
@@ -2249,6 +2398,8 @@ class HearthMainWindow(QMainWindow):
             return
 
         self.collection_sync_feeds.discard(feed_url)
+        for row in self._books_for_feed_subtree(feed_url):
+            self.force_resync_book_ids.discard(row.id)
         self._clear_pending_for_feed(feed_url)
         self._save_settings_to_file()
         self._populate_library_table(
@@ -2270,6 +2421,22 @@ class HearthMainWindow(QMainWindow):
             if action == "remove":
                 remove_ids.add(book_id)
                 continue
+            row = self.book_rows_by_id.get(book_id)
+            if row is None or row.deleted_from_server or not row.download_url:
+                continue
+            source_feeds = sorted(self.book_feeds_by_id.get(row.id, set()))
+            if not source_feeds and row.source_feed:
+                source_feeds = [row.source_feed]
+            add_by_id[row.id] = SyncItem(
+                id=row.id,
+                title=row.title,
+                author=row.author,
+                download_url=row.download_url,
+                declared_type=row.declared_type,
+                source_feeds=source_feeds,
+            )
+
+        for book_id in self.force_resync_book_ids:
             row = self.book_rows_by_id.get(book_id)
             if row is None or row.deleted_from_server or not row.download_url:
                 continue
@@ -2561,6 +2728,7 @@ class HearthMainWindow(QMainWindow):
             for book_id, action in self.pending_book_actions.items()
             if action == "remove" and book_id in result.failed_delete_ids
         }
+        self.force_resync_book_ids.clear()
         self.sync_progress_queue = None
         self._refresh_kindle_files(force=True)
         current = self.collections_tree.currentItem()
@@ -2848,6 +3016,31 @@ class HearthMainWindow(QMainWindow):
             seen.add(path)
             names.append(path)
         return names
+
+    def _show_kindle_files_context_menu(self, pos) -> None:
+        if self.is_busy:
+            return
+
+        item = self.kindle_files_tree.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self.kindle_files_tree.clearSelection()
+            item.setSelected(True)
+
+        selected_files = self._selected_kindle_paths(files_only=True)
+        selected_any = self._selected_kindle_paths(files_only=False)
+        if not selected_any:
+            return
+
+        menu = QMenu(self)
+        download_action = menu.addAction("Download Selected")
+        download_action.setEnabled(bool(selected_files))
+        download_action.triggered.connect(self._download_selected_kindle_files)
+
+        delete_action = menu.addAction("Delete Selected")
+        delete_action.setEnabled(bool(selected_any))
+        delete_action.triggered.connect(self._delete_selected_kindle_files)
+
+        menu.exec(self.kindle_files_tree.viewport().mapToGlobal(pos))
 
     def _download_selected_kindle_files(self) -> None:
         if self.is_busy:
