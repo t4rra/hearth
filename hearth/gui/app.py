@@ -211,11 +211,11 @@ class HearthMainWindow(QMainWindow):
         self.max_conversion_workers_input.setRange(1, 8)
         self.max_conversion_workers_input.setValue(1)
 
-        self.probe_kindle_button = QPushButton("Probe Kindle")
+        self.probe_kindle_button = QPushButton("Reconnect Kindle")
 
         self.load_catalog_button = QPushButton("Reload Library")
-        self.refresh_collection_button = QPushButton("Refresh Selected")
-        self.sync_selected_button = QPushButton("Sync Selected")
+        self.refresh_collection_button = QPushButton("Reload Collection")
+        self.sync_selected_button = QPushButton("Sync to Kindle")
         self.select_all_library_button = QPushButton("Select All")
         self.clear_library_selection_button = QPushButton("Clear")
         self.force_checkbox = QCheckBox("Force re-sync")
@@ -231,8 +231,8 @@ class HearthMainWindow(QMainWindow):
         self.kindle_status_label = QLabel("Kindle: probing...")
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
-        self.progress_bar.setVisible(False)
         self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("Idle")
         self.progress_bar.setFixedWidth(420)
 
         self._kcc_profiles = [
@@ -276,7 +276,7 @@ class HearthMainWindow(QMainWindow):
         self.reset_book_conversion_button = QPushButton("reset")
         self.reset_comic_conversion_button = QPushButton("reset")
         self.reset_all_button = QPushButton("Reset All Settings")
-        self.remove_from_kindle_button = QPushButton("Remove from Kindle")
+        self.remove_from_kindle_button = QPushButton("Remove Hearth Folder from Kindle")
 
         self.tabs = QTabWidget()
         self.library_tab = QWidget()
@@ -337,10 +337,8 @@ class HearthMainWindow(QMainWindow):
         controls = QHBoxLayout()
         controls.addWidget(self.load_catalog_button)
         controls.addWidget(self.refresh_collection_button)
-        controls.addWidget(self.sync_selected_button)
         controls.addWidget(self.select_all_library_button)
         controls.addWidget(self.clear_library_selection_button)
-        controls.addWidget(self.force_checkbox)
         controls.addStretch(1)
 
         tree_header = self.collections_tree.header()
@@ -378,6 +376,12 @@ class HearthMainWindow(QMainWindow):
         split.addWidget(self.collections_tree, stretch=2)
         split.addWidget(self.library_table, stretch=4)
         layout.addLayout(split)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        footer.addWidget(self.force_checkbox)
+        footer.addWidget(self.sync_selected_button)
+        layout.addLayout(footer)
 
         self.library_tab.setLayout(layout)
 
@@ -872,18 +876,21 @@ class HearthMainWindow(QMainWindow):
             )
             return
 
-        choice = QMessageBox.question(
-            self,
-            "Remove from Kindle",
-            (
-                "This will remove the Hearth folder from your Kindle. "
-                "Local Hearth settings on this computer will not be changed.\n\n"
-                "Are you sure you want to continue?"
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Remove Hearth Folder from Kindle")
+        dialog.setText(
+            "This will remove the Hearth folder from your Kindle. "
+            "Local Hearth settings on this computer will not be changed."
         )
-        if choice != QMessageBox.StandardButton.Yes:
+        dialog.setInformativeText("Are you sure you want to continue?")
+        delete_button = dialog.addButton(
+            "Delete",
+            QMessageBox.ButtonRole.DestructiveRole,
+        )
+        cancel_button = dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(cancel_button)
+        dialog.exec()
+        if dialog.clickedButton() != delete_button:
             return
 
         snapshot = self.connected_device
@@ -923,7 +930,7 @@ class HearthMainWindow(QMainWindow):
         self._log(message)
         QMessageBox.information(
             self,
-            "Remove from Kindle",
+            "Remove Hearth Folder from Kindle",
             message,
         )
 
@@ -1394,7 +1401,10 @@ class HearthMainWindow(QMainWindow):
                 / ".hearth_collection_cache.json"
             )
         workspace = Path(self.workspace_input.text().strip() or ".hearth").expanduser()
-        return workspace / ".hearth_collection_cache.mtp.json"
+        return workspace / ".hearth_collection_cache.json"
+
+    def _collection_cache_remote_name(self) -> str:
+        return "Hearth/.hearth_collection_cache.json"
 
     def _cache_key_for_feed(self, feed_url: str) -> str:
         base_url = self.feed_input.text().strip()
@@ -1423,15 +1433,38 @@ class HearthMainWindow(QMainWindow):
         return sorted(set(ids))
 
     def _load_collection_cache(self) -> None:
-        path = self._collection_cache_path()
-        if not path.exists():
-            self.collection_book_cache = {}
-            return
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            self.collection_book_cache = {}
-            return
+        if (
+            self.connected_device is not None
+            and self.connected_device.transport == "mtp"
+        ):
+            with tempfile.TemporaryDirectory(
+                prefix="hearth-collection-cache-"
+            ) as temp_dir:
+                path = Path(temp_dir) / ".hearth_collection_cache.json"
+                device = KindleDevice(
+                    transport=self.connected_device.transport,
+                    root=self.connected_device.root,
+                )
+                try:
+                    device.download_file(self._collection_cache_remote_name(), path)
+                except (OSError, RuntimeError):
+                    self.collection_book_cache = {}
+                    return
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    self.collection_book_cache = {}
+                    return
+        else:
+            path = self._collection_cache_path()
+            if not path.exists():
+                self.collection_book_cache = {}
+                return
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                self.collection_book_cache = {}
+                return
         loaded: dict[str, list[str]] = {}
         if isinstance(raw, dict):
             for feed, ids in raw.items():
@@ -1441,7 +1474,6 @@ class HearthMainWindow(QMainWindow):
         self.collection_book_cache = loaded
 
     def _save_collection_cache(self) -> None:
-        path = self._collection_cache_path()
         payload: dict[str, list[str]] = {}
 
         for record in self.metadata_records.values():
@@ -1465,21 +1497,29 @@ class HearthMainWindow(QMainWindow):
             payload = slim
             self.collection_book_cache = slim
 
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        except OSError as exc:
-            self._log(f"collection-cache save failed: {exc}")
-
         if self.connected_device is None or self.connected_device.transport != "mtp":
+            path = self._collection_cache_path()
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except OSError as exc:
+                self._log(f"collection-cache save failed: {exc}")
             return
 
         try:
-            device = KindleDevice(
-                transport=self.connected_device.transport,
-                root=self.connected_device.root,
-            )
-            device.put_file(path, "Hearth/.hearth_collection_cache.json")
+            with tempfile.TemporaryDirectory(
+                prefix="hearth-collection-cache-"
+            ) as temp_dir:
+                temp_path = Path(temp_dir) / ".hearth_collection_cache.json"
+                temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                device = KindleDevice(
+                    transport=self.connected_device.transport,
+                    root=self.connected_device.root,
+                )
+                device.put_file(
+                    temp_path,
+                    self._collection_cache_remote_name(),
+                )
         except (OSError, RuntimeError) as exc:
             self._log(f"collection-cache mtp upload failed: {exc}")
 
@@ -2996,6 +3036,10 @@ class HearthMainWindow(QMainWindow):
                 current_value = int(max(0.0, min(event.current, event.total)) * 100)
                 self.progress_bar.setRange(0, max_value)
                 self.progress_bar.setValue(current_value)
+                self.progress_bar.setFormat("%p%")
+            else:
+                self.progress_bar.setRange(0, 0)
+                self.progress_bar.setFormat("Working")
             self.status_base_text = event.message
             if event.is_log:
                 self._log(f"[sync] {event.message}")
@@ -3020,10 +3064,11 @@ class HearthMainWindow(QMainWindow):
         self._set_status_text(text)
         if determinate_total is None:
             self.progress_bar.setRange(0, 0)
+            self.progress_bar.setFormat("Working")
         else:
             self.progress_bar.setRange(0, max(1, determinate_total) * 100)
             self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(True)
+            self.progress_bar.setFormat("%p%")
         self.load_catalog_button.setEnabled(False)
         self.refresh_collection_button.setEnabled(False)
         self.sync_selected_button.setEnabled(False)
@@ -3038,9 +3083,9 @@ class HearthMainWindow(QMainWindow):
         self.is_busy = False
         self.status_base_text = "Idle"
         self._set_status_text("Idle")
-        self.progress_bar.setVisible(False)
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Idle")
         self.load_catalog_button.setEnabled(True)
         self.refresh_collection_button.setEnabled(True)
         self.sync_selected_button.setEnabled(True)
