@@ -1755,30 +1755,18 @@ class HearthMainWindow(QMainWindow):
         force_resync = self.force_checkbox.isChecked()
         action = self.pending_book_actions.get(row.id)
         if row.id in self.force_resync_book_ids:
-            return ("Will Re-sync on Sync", Qt.CheckState.PartiallyChecked, "add")
+            return ("Re-Sync", Qt.CheckState.PartiallyChecked, "add")
         if action == "add":
-            return ("Will Add on Sync", Qt.CheckState.PartiallyChecked, "add")
+            return ("Will Add", Qt.CheckState.PartiallyChecked, "add")
         if action == "remove":
-            return (
-                "Will Delete on Sync",
-                Qt.CheckState.PartiallyChecked,
-                "remove",
-            )
+            return ("Will Delete", Qt.CheckState.PartiallyChecked, "remove")
         if row.deleted_from_server and row.id in self.device_on_book_ids:
-            return (
-                "Deleted from Server (Will Delete on Sync)",
-                Qt.CheckState.PartiallyChecked,
-                "remove",
-            )
+            return ("Deleted from Server", Qt.CheckState.PartiallyChecked, "remove")
         if row.deleted_from_server:
             return ("Deleted from Server", Qt.CheckState.Unchecked, None)
         if row.id in self.device_on_book_ids:
             if force_resync:
-                return (
-                    "Will Add on Sync (Force)",
-                    Qt.CheckState.PartiallyChecked,
-                    "add",
-                )
+                return ("Will Add", Qt.CheckState.PartiallyChecked, "add")
             return ("On Device", Qt.CheckState.Checked, None)
         return ("Not On Device", Qt.CheckState.Unchecked, None)
 
@@ -2206,12 +2194,7 @@ class HearthMainWindow(QMainWindow):
                 )
             )
 
-        if (
-            has_download
-            and not on_device
-            and not is_resync
-            and pending_action != "add"
-        ):
+        if has_download and not on_device and not is_resync and pending_action != "add":
             add_action = menu.addAction("Add on Sync")
             add_action.triggered.connect(
                 lambda _checked=False, bid=book_id: (
