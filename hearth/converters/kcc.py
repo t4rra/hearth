@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
+import tempfile
 from xml.etree import ElementTree
 from typing import Callable
 import os
@@ -42,6 +44,27 @@ class KCCConverter:
         "kindle scribe 1/2": "KS",
     }
 
+    TRANSIENT_ERROR_MARKERS = (
+        "worker exited unexpectedly",
+        "failed to extract",
+        "badzipfile",
+        "crc",
+        "i/o error",
+        "temporar",
+        "timeout",
+        "resource temporarily unavailable",
+        "broken pipe",
+    )
+
+    EXTRACT_ERROR_MARKERS = (
+        "failed to extract",
+        "badzipfile",
+        "not a zip file",
+        "cannot open as archive",
+        "unexpected end of archive",
+        "crc",
+    )
+
     def __init__(
         self,
         command: str = "",
@@ -49,12 +72,22 @@ class KCCConverter:
         manga_default: bool = False,
         manga_force: bool = False,
         autolevel: bool = True,
+        preserve_margin_percent: int = 0,
+        extra_args: str = "",
     ):
         self.command = command
         self.device = device
         self.manga_default = manga_default
         self.manga_force = manga_force
         self.autolevel = autolevel
+        self.preserve_margin_percent = max(0, min(100, int(preserve_margin_percent)))
+        # Additional user-specified args (not an executable override).
+        # Stored as a list so we can inject into invocation easily.
+        self.extra_args = extra_args or ""
+        try:
+            self.extra_args_list = shlex.split(self.extra_args)
+        except Exception:
+            self.extra_args_list = []
         self.repo_dir = Path.home() / ".hearth" / "vendor" / "kcc"
         self.tools_dir = Path.home() / ".hearth" / "vendor" / "bin"
 
@@ -416,6 +449,106 @@ class KCCConverter:
         return code, "\n".join(output_lines)
 
     @classmethod
+    def _is_transient_failure(cls, output: str) -> bool:
+        text = output.lower()
+        return any(marker in text for marker in cls.TRANSIENT_ERROR_MARKERS)
+
+    @classmethod
+    def _is_extract_failure(cls, output: str) -> bool:
+        text = output.lower()
+        return any(marker in text for marker in cls.EXTRACT_ERROR_MARKERS)
+
+    @classmethod
+    def _has_failure_markers(cls, output: str) -> bool:
+        return cls._is_transient_failure(output) or cls._is_extract_failure(output)
+
+    def _run_conversion_attempts(
+        self,
+        command: list[str],
+        common_flags: list[str],
+        source: Path,
+        target: Path,
+        progress_callback: Callable[[float | None, str], None] | None,
+    ) -> tuple[bool, str]:
+        attempts: list[list[str]] = [
+            [
+                *command,
+                *common_flags,
+                *self.extra_args_list,
+                str(source),
+                "-o",
+                str(target),
+            ],
+            [
+                *command,
+                *common_flags,
+                *self.extra_args_list,
+                "-o",
+                str(target),
+                str(source),
+            ],
+        ]
+
+        last_error = ""
+        for args in attempts:
+            try:
+                if target.exists():
+                    target.unlink()
+            except OSError:
+                pass
+
+            code, output = self._run_with_output(args, progress_callback)
+            clean_output = output.strip()
+            has_failure_markers = self._has_failure_markers(clean_output)
+            if (
+                code == 0
+                and target.exists()
+                and target.stat().st_size > 0
+                and not has_failure_markers
+            ):
+                return True, output
+            if has_failure_markers and progress_callback is not None:
+                progress_callback(
+                    None,
+                    "[KCC] Conversion output indicates internal failure; ignoring generated file",
+                )
+
+            if target.exists() and (code != 0 or has_failure_markers):
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+
+            last_error = clean_output
+        return False, (last_error or "KCC conversion failed")
+
+    def _run_preextract_fallback(
+        self,
+        command: list[str],
+        common_flags: list[str],
+        source: Path,
+        target: Path,
+        progress_callback: Callable[[float | None, str], None] | None,
+    ) -> tuple[bool, str]:
+        if source.suffix.lower() != ".cbz":
+            return False, ""
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="hearth-kcc-extract-") as tmp_dir:
+                extracted = Path(tmp_dir)
+                with zipfile.ZipFile(source) as archive:
+                    archive.extractall(extracted)
+                return self._run_conversion_attempts(
+                    command=command,
+                    common_flags=common_flags,
+                    source=extracted,
+                    target=target,
+                    progress_callback=progress_callback,
+                )
+        except (OSError, zipfile.BadZipFile) as exc:
+            return False, f"pre-extract fallback failed: {exc}"
+
+    @classmethod
     def normalize_profile(cls, value: str) -> str:
         raw = value.strip()
         if not raw:
@@ -488,39 +621,64 @@ class KCCConverter:
         format_flags = ["-f", "MOBI"]
         upscale_flags = ["-u"]
         autolevel_flags = ["--autolevel"] if self.autolevel else []
+        preserve_margin_flags = (
+            ["--preservemargin", str(self.preserve_margin_percent)]
+            if self.preserve_margin_percent > 0
+            else []
+        )
         common_flags = [
             *profile_flags,
             *manga_flags,
             *upscale_flags,
             *autolevel_flags,
+            *preserve_margin_flags,
             *format_flags,
             *title_flags,
             *author_flags,
         ]
 
-        # Keep flags close to KCC GUI-equivalent behavior.
-        attempts: list[list[str]] = [
-            [
-                *command,
-                *common_flags,
-                str(source),
-                "-o",
-                str(target),
-            ],
-            [
-                *command,
-                *common_flags,
-                "-o",
-                str(target),
-                str(source),
-            ],
-        ]
+        succeeded, last_error = self._run_conversion_attempts(
+            command=command,
+            common_flags=common_flags,
+            source=source,
+            target=target,
+            progress_callback=progress_callback,
+        )
+        if succeeded:
+            return target
 
-        last_error = ""
-        for args in attempts:
-            code, output = self._run_with_output(args, progress_callback)
-            if code == 0 and target.exists() and target.stat().st_size > 0:
+        if self._is_extract_failure(last_error) and source.suffix.lower() == ".cbz":
+            if progress_callback is not None:
+                progress_callback(
+                    None,
+                    "[KCC] Extraction-related failure detected; trying pre-extract fallback",
+                )
+            fallback_ok, fallback_error = self._run_preextract_fallback(
+                command=command,
+                common_flags=common_flags,
+                source=source,
+                target=target,
+                progress_callback=progress_callback,
+            )
+            if fallback_ok:
                 return target
-            last_error = output.strip()
+            if fallback_error:
+                last_error = fallback_error
+
+        if self._is_transient_failure(last_error):
+            if progress_callback is not None:
+                progress_callback(None, "[KCC] Transient conversion failure; retrying once")
+            time.sleep(0.35)
+            retry_ok, retry_error = self._run_conversion_attempts(
+                command=command,
+                common_flags=common_flags,
+                source=source,
+                target=target,
+                progress_callback=progress_callback,
+            )
+            if retry_ok:
+                return target
+            if retry_error:
+                last_error = retry_error
 
         raise RuntimeError(last_error or "KCC conversion failed")

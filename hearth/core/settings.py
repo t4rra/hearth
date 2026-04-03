@@ -25,7 +25,9 @@ class Settings:
     kcc_manga_default: bool = False
     kcc_manga_force: bool = False
     kcc_autolevel: bool = True
+    kcc_preserve_margin_percent: int = 0
     calibre_command: str = ""
+    convert_pdfs: bool = False
     max_conversion_workers: int = 1
     collection_sync_feeds: list[str] = field(default_factory=list)
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import shlex
 from typing import Callable
 
 from .detection import COMIC_EXTENSIONS
@@ -14,6 +15,18 @@ class CalibreConverter:
 
     def __init__(self, command: str = ""):
         self.command = command
+        self.extra_args = ""
+        try:
+            self.extra_args_list: list[str] = []
+        except Exception:
+            self.extra_args_list = []
+
+    def set_extra_args(self, extra: str) -> None:
+        self.extra_args = extra or ""
+        try:
+            self.extra_args_list = shlex.split(self.extra_args)
+        except Exception:
+            self.extra_args_list = []
 
     def discover_command(self) -> str | None:
         if self.command:
@@ -130,6 +143,10 @@ class CalibreConverter:
             )
             if self._looks_like_manga(title, author, source):
                 args.append("--right2left")
+
+        # Append any user-specified extra args for ebook-convert here.
+        if hasattr(self, "extra_args_list") and self.extra_args_list:
+            args.extend(self.extra_args_list)
 
         code, output = self._run_with_output(
             args,

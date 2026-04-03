@@ -82,6 +82,136 @@ def _write_fake_kcc_with_arg_capture(script_path: Path, capture_path: Path) -> N
     script_path.chmod(0o755)
 
 
+def _write_fake_kcc_retry_once_then_success(
+    script_path: Path,
+    counter_path: Path,
+) -> None:
+    script_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib\n"
+        "import sys\n"
+        f"counter = pathlib.Path({str(counter_path)!r})\n"
+        "n = 0\n"
+        "if counter.exists():\n"
+        "    n = int(counter.read_text(encoding='utf-8') or '0')\n"
+        "n += 1\n"
+        "counter.parent.mkdir(parents=True, exist_ok=True)\n"
+        "counter.write_text(str(n), encoding='utf-8')\n"
+        "args = sys.argv[1:]\n"
+        "source = None\n"
+        "target = None\n"
+        "for idx, arg in enumerate(args):\n"
+        "    if arg in {'-o', '--output'} and idx + 1 < len(args):\n"
+        "        target = pathlib.Path(args[idx + 1])\n"
+        "for arg in args:\n"
+        "    if arg and not arg.startswith('-'):\n"
+        "        p = pathlib.Path(arg)\n"
+        "        if p.exists():\n"
+        "            source = p\n"
+        "            break\n"
+        "if source is None or target is None:\n"
+        "    raise SystemExit(2)\n"
+        "if n <= 2:\n"
+        "    print('Worker exited unexpectedly')\n"
+        "    raise SystemExit(1)\n"
+        "target.parent.mkdir(parents=True, exist_ok=True)\n"
+        "payload = source.read_bytes() if source.is_file() else b'dir'\n"
+        "target.write_bytes(b'BOOKMOBI' + payload[:64])\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+
+def _write_fake_kcc_fail_cbz_but_succeed_for_dir(
+    script_path: Path,
+    counter_path: Path,
+) -> None:
+    script_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib\n"
+        "import sys\n"
+        f"counter = pathlib.Path({str(counter_path)!r})\n"
+        "n = 0\n"
+        "if counter.exists():\n"
+        "    n = int(counter.read_text(encoding='utf-8') or '0')\n"
+        "n += 1\n"
+        "counter.parent.mkdir(parents=True, exist_ok=True)\n"
+        "counter.write_text(str(n), encoding='utf-8')\n"
+        "args = sys.argv[1:]\n"
+        "source = None\n"
+        "target = None\n"
+        "for idx, arg in enumerate(args):\n"
+        "    if arg in {'-o', '--output'} and idx + 1 < len(args):\n"
+        "        target = pathlib.Path(args[idx + 1])\n"
+        "for arg in args:\n"
+        "    if arg and not arg.startswith('-'):\n"
+        "        p = pathlib.Path(arg)\n"
+        "        if p.exists():\n"
+        "            source = p\n"
+        "            break\n"
+        "if source is None or target is None:\n"
+        "    raise SystemExit(2)\n"
+        "if source.is_file() and source.suffix.lower() == '.cbz':\n"
+        "    print('Failed to extract archive')\n"
+        "    raise SystemExit(1)\n"
+        "target.parent.mkdir(parents=True, exist_ok=True)\n"
+        "payload = source.read_bytes() if source.is_file() else b'dir'\n"
+        "target.write_bytes(b'BOOKMOBI' + payload[:64])\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+
+def _write_fake_kcc_non_transient_failure(
+    script_path: Path,
+    counter_path: Path,
+) -> None:
+    script_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib\n"
+        "import sys\n"
+        f"counter = pathlib.Path({str(counter_path)!r})\n"
+        "n = 0\n"
+        "if counter.exists():\n"
+        "    n = int(counter.read_text(encoding='utf-8') or '0')\n"
+        "n += 1\n"
+        "counter.parent.mkdir(parents=True, exist_ok=True)\n"
+        "counter.write_text(str(n), encoding='utf-8')\n"
+        "print('fatal: unsupported content layout')\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+
+def _write_fake_kcc_success_code_with_failure_marker(script_path: Path) -> None:
+    script_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib\n"
+        "import sys\n"
+        "args = sys.argv[1:]\n"
+        "source = None\n"
+        "target = None\n"
+        "for idx, arg in enumerate(args):\n"
+        "    if arg in {'-o', '--output'} and idx + 1 < len(args):\n"
+        "        target = pathlib.Path(args[idx + 1])\n"
+        "for arg in args:\n"
+        "    if arg and not arg.startswith('-'):\n"
+        "        p = pathlib.Path(arg)\n"
+        "        if p.exists():\n"
+        "            source = p\n"
+        "            break\n"
+        "if source is None or target is None:\n"
+        "    raise SystemExit(2)\n"
+        "target.parent.mkdir(parents=True, exist_ok=True)\n"
+        "target.write_bytes(b'BOOKMOBI' + source.read_bytes()[:64])\n"
+        "print('Worker exited unexpectedly')\n"
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+
 def test_calibre_converter_uses_command_execution(
     tmp_path: Path,
     sample_epub_path: Path,
@@ -269,3 +399,113 @@ def test_kcc_can_disable_autolevel(tmp_path: Path) -> None:
 
     args = json.loads(capture_path.read_text(encoding="utf-8"))
     assert "--autolevel" not in args
+
+
+def test_kcc_preserve_margin_flag_can_be_set(tmp_path: Path) -> None:
+    fake_kcc = tmp_path / "kcc-c2e"
+    capture_path = tmp_path / "kcc_args.json"
+    _write_fake_kcc_with_arg_capture(fake_kcc, capture_path)
+
+    source = tmp_path / "comic.cbz"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("ComicInfo.xml", "<ComicInfo><Title>T</Title></ComicInfo>")
+        archive.writestr("001.jpg", b"image-data")
+
+    manager = ConverterManager.from_commands(
+        kcc_command=str(fake_kcc),
+        kcc_preserve_margin_percent=12,
+    )
+    manager.convert_for_kindle(
+        source=source,
+        destination_dir=tmp_path / "converted",
+        stem="comic-test",
+        declared_type="application/vnd.comicbook+zip",
+    )
+
+    args = json.loads(capture_path.read_text(encoding="utf-8"))
+    assert "--preservemargin" in args
+    assert args[args.index("--preservemargin") + 1] == "12"
+
+
+def test_kcc_retries_once_for_transient_failure(tmp_path: Path) -> None:
+    fake_kcc = tmp_path / "kcc-c2e"
+    counter_path = tmp_path / "invocations.txt"
+    _write_fake_kcc_retry_once_then_success(fake_kcc, counter_path)
+
+    source = tmp_path / "comic.cbz"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("001.jpg", b"image-data")
+
+    manager = ConverterManager.from_commands(kcc_command=str(fake_kcc))
+    result = manager.convert_for_kindle(
+        source=source,
+        destination_dir=tmp_path / "converted",
+        stem="comic-retry",
+        declared_type="application/vnd.comicbook+zip",
+    )
+
+    assert result.output.exists()
+    assert int(counter_path.read_text(encoding="utf-8")) == 3
+
+
+def test_kcc_uses_preextract_fallback_for_cbz_extract_errors(tmp_path: Path) -> None:
+    fake_kcc = tmp_path / "kcc-c2e"
+    counter_path = tmp_path / "invocations.txt"
+    _write_fake_kcc_fail_cbz_but_succeed_for_dir(fake_kcc, counter_path)
+
+    source = tmp_path / "comic.cbz"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("001.jpg", b"image-data")
+
+    manager = ConverterManager.from_commands(kcc_command=str(fake_kcc))
+    result = manager.convert_for_kindle(
+        source=source,
+        destination_dir=tmp_path / "converted",
+        stem="comic-fallback",
+        declared_type="application/vnd.comicbook+zip",
+    )
+
+    assert result.output.exists()
+    assert int(counter_path.read_text(encoding="utf-8")) == 3
+
+
+def test_kcc_does_not_retry_non_transient_failure(tmp_path: Path) -> None:
+    fake_kcc = tmp_path / "kcc-c2e"
+    counter_path = tmp_path / "invocations.txt"
+    _write_fake_kcc_non_transient_failure(fake_kcc, counter_path)
+
+    source = tmp_path / "comic.cbz"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("001.jpg", b"image-data")
+
+    manager = ConverterManager.from_commands(kcc_command=str(fake_kcc))
+    with pytest.raises(RuntimeError):
+        manager.convert_for_kindle(
+            source=source,
+            destination_dir=tmp_path / "converted",
+            stem="comic-fail",
+            declared_type="application/vnd.comicbook+zip",
+        )
+
+    # Only the two default argument-order attempts should run.
+    assert int(counter_path.read_text(encoding="utf-8")) == 2
+
+
+def test_kcc_rejects_output_when_failure_marker_present(tmp_path: Path) -> None:
+    fake_kcc = tmp_path / "kcc-c2e"
+    _write_fake_kcc_success_code_with_failure_marker(fake_kcc)
+
+    source = tmp_path / "comic.cbz"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("001.jpg", b"image-data")
+
+    manager = ConverterManager.from_commands(kcc_command=str(fake_kcc))
+    with pytest.raises(RuntimeError):
+        manager.convert_for_kindle(
+            source=source,
+            destination_dir=tmp_path / "converted",
+            stem="comic-marker",
+            declared_type="application/vnd.comicbook+zip",
+        )
+
+    assert not (tmp_path / "converted" / "comic-marker.mobi").exists()

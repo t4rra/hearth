@@ -8,17 +8,19 @@ from pathlib import Path
 from queue import Empty, SimpleQueue
 import json
 import traceback
+import tempfile
 from typing import Any, Callable, Literal, cast
 import urllib.parse
 
 from PyQt6.QtCore import QTimer, Qt  # type: ignore[import-not-found]
-from PyQt6.QtGui import QBrush, QColor, QPalette, QIcon  # type: ignore[import-not-found]
+from PyQt6.QtGui import QBrush, QColor, QPalette, QIcon, QFont  # type: ignore[import-not-found]
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QGridLayout,
     QGroupBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -34,6 +36,7 @@ from PyQt6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QTextEdit,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -44,7 +47,12 @@ from hearth.core.opds import OPDSClient, OPDSSession
 from hearth.core.settings import Settings
 from hearth.sync.device import DeviceFile, KindleDevice
 from hearth.sync.manager import SyncItem, SyncManager, SyncProgress
-from hearth.sync.metadata import SyncRecord, load_metadata
+from hearth.sync.metadata import (
+    SyncRecord,
+    load_metadata,
+    reconcile_on_device,
+    save_metadata,
+)
 
 from .workers import WorkerPool
 
@@ -102,6 +110,18 @@ class SyncRunSummary:
     deleted: int
     delete_failed: int
     failed_delete_ids: list[str]
+
+
+@dataclass(slots=True)
+class MetadataRebuildResult:
+    path: Path
+    before_count: int
+    after_count: int
+
+
+@dataclass(slots=True)
+class RemoveFromKindleResult:
+    removed: bool
 
 
 class HearthMainWindow(QMainWindow):
@@ -180,7 +200,12 @@ class HearthMainWindow(QMainWindow):
         self.kcc_manga_force_checkbox = QCheckBox("Force manga reading direction")
         self.kcc_autolevel_checkbox = QCheckBox("Enable KCC autolevel")
         self.kcc_autolevel_checkbox.setChecked(True)
+        self.kcc_preserve_margin_input = QSpinBox()
+        self.kcc_preserve_margin_input.setRange(0, 100)
+        self.kcc_preserve_margin_input.setSuffix("%")
+        self.kcc_preserve_margin_input.setValue(0)
         self.calibre_command_input = QLineEdit("")
+        self.convert_pdfs_checkbox = QCheckBox("Convert PDFs with Calibre")
         self.max_conversion_workers_input = QSpinBox()
         self.max_conversion_workers_input.setRange(1, 8)
         self.max_conversion_workers_input.setValue(1)
@@ -243,16 +268,20 @@ class HearthMainWindow(QMainWindow):
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
 
-        self.reset_general_button = QPushButton("Reset General")
-        self.reset_opds_button = QPushButton("Reset OPDS")
-        self.reset_kindle_button = QPushButton("Reset Kindle")
-        self.reset_conversion_button = QPushButton("Reset Conversion")
-        self.reset_all_button = QPushButton("Reset All")
+        self.reset_general_button = QPushButton("reset")
+        self.reset_opds_button = QPushButton("reset")
+        self.reset_kindle_button = QPushButton("reset")
+        self.regenerate_metadata_button = QPushButton("Regenerate Metadata")
+        self.reset_book_conversion_button = QPushButton("reset")
+        self.reset_comic_conversion_button = QPushButton("reset")
+        self.reset_all_button = QPushButton("Reset All Settings")
+        self.remove_from_kindle_button = QPushButton("Remove from Kindle")
 
         self.tabs = QTabWidget()
         self.library_tab = QWidget()
         self.kindle_files_tab = QWidget()
         self.settings_tab = QWidget()
+        self.logs_tab = QWidget()
 
         self._configure_layout()
         self._connect_events()
@@ -288,15 +317,15 @@ class HearthMainWindow(QMainWindow):
         self._configure_library_tab()
         self._configure_kindle_files_tab()
         self._configure_settings_tab()
+        self._configure_logs_tab()
 
         self.tabs.addTab(self.library_tab, "Library")
         self.tabs.addTab(self.kindle_files_tab, "Kindle Files")
         self.tabs.addTab(self.settings_tab, "Settings")
+        self.tabs.addTab(self.logs_tab, "Logs")
 
         root.addLayout(header)
-        root.addWidget(self.tabs, stretch=5)
-        root.addWidget(QLabel("Log"))
-        root.addWidget(self.log_output, stretch=2)
+        root.addWidget(self.tabs, stretch=1)
 
         central.setLayout(root)
         self.setCentralWidget(central)
@@ -384,8 +413,8 @@ class HearthMainWindow(QMainWindow):
         general_layout.addWidget(QLabel("Workspace"), 0, 0)
         general_layout.addWidget(self.workspace_input, 0, 1, 1, 3)
         general_layout.addWidget(QLabel("Download folder"), 1, 0)
-        general_layout.addWidget(self.download_dir_input, 1, 1, 1, 2)
-        general_layout.addWidget(self.reset_general_button, 1, 3)
+        general_layout.addWidget(self.download_dir_input, 1, 1, 1, 3)
+        general_layout.addWidget(self.reset_general_button, 2, 3)
         general_group.setLayout(general_layout)
 
         opds_group = QGroupBox("OPDS")
@@ -409,27 +438,54 @@ class HearthMainWindow(QMainWindow):
         kindle_layout.addWidget(self.transport_combo, 0, 1)
         kindle_layout.addWidget(QLabel("Mount"), 0, 2)
         kindle_layout.addWidget(self.kindle_root_input, 0, 3)
+        kindle_layout.addWidget(self.regenerate_metadata_button, 1, 2)
         kindle_layout.addWidget(self.reset_kindle_button, 1, 3)
         kindle_group.setLayout(kindle_layout)
 
         conversion_group = QGroupBox("Conversion")
         conversion_layout = QGridLayout()
-        conversion_layout.addWidget(QLabel("Preferred output"), 0, 0)
-        conversion_layout.addWidget(self.desired_output_combo, 0, 1)
-        conversion_layout.addWidget(QLabel("KCC command"), 1, 0)
-        conversion_layout.addWidget(self.kcc_command_input, 1, 1, 1, 3)
-        conversion_layout.addWidget(QLabel("KCC device"), 2, 0)
-        conversion_layout.addWidget(self.kcc_device_input, 2, 1)
-        conversion_layout.addWidget(self.kcc_manga_default_checkbox, 3, 0, 1, 2)
-        conversion_layout.addWidget(self.kcc_manga_force_checkbox, 3, 2, 1, 2)
-        conversion_layout.addWidget(self.kcc_autolevel_checkbox, 4, 0, 1, 2)
-        conversion_layout.addWidget(QLabel("Concurrent conversions"), 5, 0)
-        conversion_layout.addWidget(self.max_conversion_workers_input, 5, 1)
-        conversion_layout.addWidget(self.reset_conversion_button, 6, 3)
+        conversion_layout.addWidget(QLabel("Concurrent conversions"), 0, 0)
+        conversion_layout.addWidget(self.max_conversion_workers_input, 0, 1)
+
+        books_label = QLabel("Books")
+        books_label.setStyleSheet("font-weight: bold; color: #2a2f6a;")
+        conversion_layout.addWidget(books_label, 3, 0, 1, 4)
+        conversion_layout.addWidget(QLabel("Preferred output"), 4, 0)
+        conversion_layout.addWidget(self.desired_output_combo, 4, 1)
+        conversion_layout.addWidget(QLabel("Additional Calibre arguments"), 5, 0)
+        conversion_layout.addWidget(self.calibre_command_input, 5, 1, 1, 3)
+        self.calibre_command_input.setPlaceholderText(
+            "e.g. --mobi-keep-original-images --some-flag OR /path/to/ebook-convert"
+        )
+        conversion_layout.addWidget(self.convert_pdfs_checkbox, 6, 0, 1, 2)
+        conversion_layout.addWidget(self.reset_book_conversion_button, 7, 3)
+
+        books_divider = QFrame()
+        books_divider.setFrameShape(QFrame.Shape.HLine)
+        books_divider.setFrameShadow(QFrame.Shadow.Sunken)
+        conversion_layout.addWidget(books_divider, 8, 0, 1, 4)
+
+        comics_label = QLabel("Comics")
+        comics_label.setStyleSheet("font-weight: bold; color: #2a2f6a;")
+        conversion_layout.addWidget(comics_label, 9, 0, 1, 4)
+        conversion_layout.addWidget(QLabel("Additional KCC arguments"), 10, 0)
+        conversion_layout.addWidget(self.kcc_command_input, 10, 1, 1, 3)
+        self.kcc_command_input.setPlaceholderText(
+            "e.g. --manga-style --quality=80 OR /path/to/kcc-c2e"
+        )
+        conversion_layout.addWidget(QLabel("KCC device"), 11, 0)
+        conversion_layout.addWidget(self.kcc_device_input, 11, 1)
+        conversion_layout.addWidget(self.kcc_manga_default_checkbox, 12, 0, 1, 2)
+        conversion_layout.addWidget(self.kcc_manga_force_checkbox, 12, 2, 1, 2)
+        conversion_layout.addWidget(self.kcc_autolevel_checkbox, 13, 0, 1, 2)
+        conversion_layout.addWidget(QLabel("Preserve margin"), 14, 0)
+        conversion_layout.addWidget(self.kcc_preserve_margin_input, 14, 1)
+        conversion_layout.addWidget(self.reset_comic_conversion_button, 15, 3)
         conversion_group.setLayout(conversion_layout)
 
         footer = QHBoxLayout()
         footer.addStretch(1)
+        footer.addWidget(self.remove_from_kindle_button)
         footer.addWidget(self.reset_all_button)
 
         tab_layout.addWidget(general_group)
@@ -439,7 +495,20 @@ class HearthMainWindow(QMainWindow):
         tab_layout.addLayout(footer)
         tab_layout.addStretch(1)
 
-        self.settings_tab.setLayout(tab_layout)
+        # Make the settings panel scrollable to avoid huge window sizes.
+        inner = QWidget()
+        inner.setLayout(tab_layout)
+        scroll = QScrollArea()
+        scroll.setWidget(inner)
+        scroll.setWidgetResizable(True)
+        outer = QVBoxLayout()
+        outer.addWidget(scroll)
+        self.settings_tab.setLayout(outer)
+
+    def _configure_logs_tab(self) -> None:
+        layout = QVBoxLayout()
+        layout.addWidget(self.log_output)
+        self.logs_tab.setLayout(layout)
 
     def _connect_events(self) -> None:
         self.probe_kindle_button.clicked.connect(self._probe_kindle)
@@ -471,8 +540,14 @@ class HearthMainWindow(QMainWindow):
         self.reset_general_button.clicked.connect(self._reset_general)
         self.reset_opds_button.clicked.connect(self._reset_opds)
         self.reset_kindle_button.clicked.connect(self._reset_kindle)
-        self.reset_conversion_button.clicked.connect(self._reset_conversion)
+        self.regenerate_metadata_button.clicked.connect(self._regenerate_metadata_file)
+        self.reset_book_conversion_button.clicked.connect(self._reset_book_conversion)
+        self.reset_comic_conversion_button.clicked.connect(self._reset_comic_conversion)
         self.reset_all_button.clicked.connect(self._reset_all)
+        self.remove_from_kindle_button.clicked.connect(
+            self._remove_from_kindle_and_reset
+        )
+        self.force_checkbox.toggled.connect(self._on_force_resync_toggled)
 
         self._connect_autosave()
 
@@ -486,6 +561,7 @@ class HearthMainWindow(QMainWindow):
             combo.currentTextChanged.connect(self._save_settings_to_file)
 
         for checkbox in [
+            self.convert_pdfs_checkbox,
             self.kcc_manga_default_checkbox,
             self.kcc_manga_force_checkbox,
             self.kcc_autolevel_checkbox,
@@ -495,6 +571,7 @@ class HearthMainWindow(QMainWindow):
         self.max_conversion_workers_input.valueChanged.connect(
             self._save_settings_to_file
         )
+        self.kcc_preserve_margin_input.valueChanged.connect(self._save_settings_to_file)
 
         for edit in [
             self.workspace_input,
@@ -504,6 +581,7 @@ class HearthMainWindow(QMainWindow):
             self.auth_password_input,
             self.auth_bearer_input,
             self.kindle_root_input,
+            self.calibre_command_input,
             self.kcc_command_input,
         ]:
             edit.editingFinished.connect(self._save_settings_to_file)
@@ -529,6 +607,10 @@ class HearthMainWindow(QMainWindow):
         self.kcc_manga_default_checkbox.setChecked(settings.kcc_manga_default)
         self.kcc_manga_force_checkbox.setChecked(settings.kcc_manga_force)
         self.kcc_autolevel_checkbox.setChecked(settings.kcc_autolevel)
+        self.kcc_preserve_margin_input.setValue(
+            max(0, min(100, int(settings.kcc_preserve_margin_percent)))
+        )
+        self.convert_pdfs_checkbox.setChecked(settings.convert_pdfs)
         self.max_conversion_workers_input.setValue(
             max(1, min(8, int(settings.max_conversion_workers)))
         )
@@ -574,7 +656,9 @@ class HearthMainWindow(QMainWindow):
             kcc_manga_default=self.kcc_manga_default_checkbox.isChecked(),
             kcc_manga_force=self.kcc_manga_force_checkbox.isChecked(),
             kcc_autolevel=self.kcc_autolevel_checkbox.isChecked(),
+            kcc_preserve_margin_percent=self.kcc_preserve_margin_input.value(),
             calibre_command=self.calibre_command_input.text().strip(),
+            convert_pdfs=self.convert_pdfs_checkbox.isChecked(),
             max_conversion_workers=self.max_conversion_workers_input.value(),
             collection_sync_feeds=sorted(self.collection_sync_feeds),
         )
@@ -599,16 +683,232 @@ class HearthMainWindow(QMainWindow):
         self.kindle_root_input.setText("")
         self._save_settings_to_file()
 
-    def _reset_conversion(self) -> None:
+    def _metadata_remote_name(self) -> str:
+        return "Hearth/.hearth_metadata.json"
+
+    def _metadata_path_for(self, device: KindleDevice) -> Path:
+        return device.documents_dir / "Hearth" / ".hearth_metadata.json"
+
+    def _load_metadata_from_device(self, device: KindleDevice) -> dict[str, SyncRecord]:
+        if device.transport != "mtp":
+            return load_metadata(self._metadata_path_for(device))
+
+        with tempfile.TemporaryDirectory(prefix="hearth-metadata-") as temp_dir:
+            temp_path = Path(temp_dir) / ".hearth_metadata.json"
+            try:
+                device.download_file(self._metadata_remote_name(), temp_path)
+            except (OSError, RuntimeError):
+                return {}
+            return load_metadata(temp_path)
+
+    def _save_metadata_to_device(
+        self,
+        device: KindleDevice,
+        records: dict[str, SyncRecord],
+    ) -> Path:
+        metadata_path = self._metadata_path_for(device)
+        if device.transport != "mtp":
+            save_metadata(metadata_path, records)
+            return metadata_path
+
+        with tempfile.TemporaryDirectory(prefix="hearth-metadata-") as temp_dir:
+            temp_path = Path(temp_dir) / ".hearth_metadata.json"
+            save_metadata(temp_path, records)
+            device.put_file(temp_path, self._metadata_remote_name())
+        return metadata_path
+
+    def _regenerate_metadata_file(self) -> None:
+        if self.is_busy:
+            return
+
+        if self.connected_device is None:
+            QMessageBox.warning(
+                self,
+                "No Kindle",
+                "Connect and probe a Kindle before regenerating metadata.",
+            )
+            return
+
+        decision = QMessageBox.question(
+            self,
+            "Regenerate Metadata",
+            (
+                "This rebuilds Hearth metadata from currently tracked records "
+                "and files detected on the Kindle. Continue?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if decision != QMessageBox.StandardButton.Yes:
+            return
+
+        self._set_busy("Regenerating metadata...")
+        snapshot = self.connected_device
+        future = self.worker_pool.submit(
+            self._regenerate_metadata_worker,
+            snapshot,
+        )
+        self.pending_tasks.append(
+            PendingTask(
+                future=future,
+                on_success=self._on_regenerate_metadata_finished,
+                action_name="regenerate metadata",
+            )
+        )
+
+    def _regenerate_metadata_worker(
+        self,
+        snapshot: DeviceSnapshot,
+    ) -> MetadataRebuildResult:
+        device = KindleDevice(
+            transport=snapshot.transport,
+            root=snapshot.root,
+        )
+        metadata_path = self._metadata_path_for(device)
+        records = self._load_metadata_from_device(device)
+        before_count = len(records)
+
+        device_files: set[str] = set()
+        for entry in device.list_files():
+            if entry.is_dir:
+                continue
+            device_files.add(entry.path)
+            device_files.add(entry.name)
+            normalized = entry.path.strip("/")
+            if normalized:
+                device_files.add(normalized)
+                if normalized.startswith("documents/"):
+                    relative = normalized.removeprefix("documents/")
+                    device_files.add(relative)
+
+        reconciled = reconcile_on_device(records, device_files)
+        cleaned = {
+            key: record
+            for key, record in reconciled.items()
+            if record.desired or record.on_device
+        }
+        self._save_metadata_to_device(device, cleaned)
+        return MetadataRebuildResult(
+            path=metadata_path,
+            before_count=before_count,
+            after_count=len(cleaned),
+        )
+
+    def _on_regenerate_metadata_finished(self, result: object) -> None:
+        if not isinstance(result, MetadataRebuildResult):
+            raise TypeError("Unexpected metadata rebuild result")
+
+        self._refresh_device_library_state()
+        current = self.collections_tree.currentItem()
+        if current is not None:
+            feed_url = current.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(feed_url, str):
+                self._populate_library_table(
+                    self._books_for_feed_subtree(feed_url),
+                    allow_book_toggles=self._should_allow_book_toggles(feed_url),
+                )
+        self._refresh_all_collection_visuals()
+        self._save_collection_cache()
+        self._log(
+            "Regenerated metadata: "
+            f"{result.path} ({result.before_count} -> {result.after_count})"
+        )
+        QMessageBox.information(
+            self,
+            "Metadata Regenerated",
+            (
+                "Hearth metadata has been rebuilt.\n"
+                f"Path: {result.path}\n"
+                f"Records: {result.before_count} -> {result.after_count}"
+            ),
+        )
+
+    def _reset_book_conversion(self) -> None:
         self.desired_output_combo.setCurrentText("auto")
+        self.calibre_command_input.setText("")
+        self.convert_pdfs_checkbox.setChecked(False)
+        self.max_conversion_workers_input.setValue(1)
+        self._save_settings_to_file()
+
+    def _reset_comic_conversion(self) -> None:
         self.kcc_command_input.setText("")
         self._set_kcc_device_ui("auto")
         self.kcc_manga_default_checkbox.setChecked(False)
         self.kcc_manga_force_checkbox.setChecked(False)
         self.kcc_autolevel_checkbox.setChecked(True)
-        self.max_conversion_workers_input.setValue(1)
-        self.calibre_command_input.setText("")
+        self.kcc_preserve_margin_input.setValue(0)
         self._save_settings_to_file()
+
+    def _reset_conversion(self) -> None:
+        self._reset_book_conversion()
+        self._reset_comic_conversion()
+
+    def _remove_from_kindle_and_reset(self) -> None:
+        if self.is_busy:
+            return
+
+        if self.connected_device is None:
+            QMessageBox.warning(
+                self,
+                "No Kindle",
+                "Connect and probe a Kindle before removing Hearth data.",
+            )
+            return
+
+        choice = QMessageBox.question(
+            self,
+            "Remove from Kindle",
+            (
+                "This will remove the Hearth folder from your Kindle. "
+                "Local Hearth settings on this computer will not be changed.\n\n"
+                "Are you sure you want to continue?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+
+        snapshot = self.connected_device
+        self._set_busy("Removing Hearth data from Kindle...")
+        future = self.worker_pool.submit(
+            self._remove_from_kindle_worker,
+            snapshot,
+        )
+        self.pending_tasks.append(
+            PendingTask(
+                future=future,
+                on_success=self._on_remove_from_kindle_finished,
+                action_name="remove from kindle",
+            )
+        )
+
+    def _remove_from_kindle_worker(
+        self,
+        snapshot: DeviceSnapshot,
+    ) -> RemoveFromKindleResult:
+        device = KindleDevice(
+            transport=snapshot.transport,
+            root=snapshot.root,
+        )
+        removed = device.delete_file("Hearth")
+        return RemoveFromKindleResult(removed=removed)
+
+    def _on_remove_from_kindle_finished(self, result: object) -> None:
+        if not isinstance(result, RemoveFromKindleResult):
+            raise TypeError("Unexpected remove-from-kindle result")
+        self._refresh_kindle_files(force=True)
+        self._refresh_device_library_state()
+        self._refresh_all_collection_visuals()
+        message = "Hearth folder removed from Kindle."
+        if not result.removed:
+            message = "Hearth folder was not found on Kindle."
+        self._log(message)
+        QMessageBox.information(
+            self,
+            "Remove from Kindle",
+            message,
+        )
 
     def _selected_kcc_device_code(self) -> str:
         idx = self.kcc_device_input.currentIndex()
@@ -641,7 +941,8 @@ class HearthMainWindow(QMainWindow):
         self._reset_general()
         self._reset_opds()
         self._reset_kindle()
-        self._reset_conversion()
+        self._reset_book_conversion()
+        self._reset_comic_conversion()
         self._log("Reset all settings groups")
 
     def _update_auth_visibility(self) -> None:
@@ -1290,7 +1591,7 @@ class HearthMainWindow(QMainWindow):
     def _expand_synced_collection_paths(self) -> None:
         for feed in self.collection_sync_feeds:
             self._expanded_collection_feeds.add(feed)
-            current = feed
+            current: str | None = feed
             while current:
                 item = self.tree_item_by_feed.get(current)
                 if item is not None:
@@ -1346,15 +1647,7 @@ class HearthMainWindow(QMainWindow):
             transport=self.connected_device.transport,
             root=self.connected_device.root,
         )
-        if device.transport == "mtp":
-            metadata_path = (
-                Path(self.workspace_input.text().strip() or ".hearth")
-                / ".hearth_metadata.mtp.json"
-            )
-        else:
-            metadata_path = device.documents_dir / ".hearth_metadata.json"
-
-        self.metadata_records = load_metadata(metadata_path)
+        self.metadata_records = self._load_metadata_from_device(device)
         self._load_collection_cache()
         try:
             entries = device.list_files()
@@ -1390,6 +1683,7 @@ class HearthMainWindow(QMainWindow):
         self,
         row: LibraryRow,
     ) -> tuple[str, Qt.CheckState, Literal["add", "remove"] | None]:
+        force_resync = self.force_checkbox.isChecked()
         action = self.pending_book_actions.get(row.id)
         if action == "add":
             return ("Will Add on Sync", Qt.CheckState.PartiallyChecked, "add")
@@ -1408,8 +1702,28 @@ class HearthMainWindow(QMainWindow):
         if row.deleted_from_server:
             return ("Deleted from Server", Qt.CheckState.Unchecked, None)
         if row.id in self.device_on_book_ids:
+            if force_resync:
+                return (
+                    "Will Add on Sync (Force)",
+                    Qt.CheckState.PartiallyChecked,
+                    "add",
+                )
             return ("On Device", Qt.CheckState.Checked, None)
         return ("Not On Device", Qt.CheckState.Unchecked, None)
+
+    def _on_force_resync_toggled(self, _checked: bool) -> None:
+        """Refresh current library visuals when force mode is toggled."""
+        current = self.collections_tree.currentItem()
+        if current is None:
+            return
+        feed_url = current.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(feed_url, str):
+            return
+        self._populate_library_table(
+            self._books_for_feed_subtree(feed_url),
+            allow_book_toggles=self._should_allow_book_toggles(feed_url),
+        )
+        self._refresh_collection_visual(feed_url)
 
     def _collection_subtree_feeds(self, root_feed: str) -> set[str]:
         feeds: set[str] = set()
@@ -1886,11 +2200,16 @@ class HearthMainWindow(QMainWindow):
         )
         self._refresh_collection_visual(feed_url)
 
-    def _planned_sync_actions(self) -> tuple[list[SyncItem], list[str]]:
+    def _planned_sync_actions(
+        self,
+        force_resync: bool = False,
+    ) -> tuple[list[SyncItem], list[str]]:
         add_by_id: dict[str, SyncItem] = {}
         remove_ids: set[str] = set()
 
         for book_id, action in self.pending_book_actions.items():
+            if force_resync:
+                continue
             if action == "remove":
                 remove_ids.add(book_id)
                 continue
@@ -1917,11 +2236,11 @@ class HearthMainWindow(QMainWindow):
         for feed in selected_scope_feeds:
             for row in self._books_for_feed_subtree(feed):
                 if row.deleted_from_server:
-                    if row.id in self.device_on_book_ids:
+                    if (not force_resync) and row.id in self.device_on_book_ids:
                         remove_ids.add(row.id)
                     continue
                 available_selected_ids.add(row.id)
-                if row.id in self.device_on_book_ids:
+                if (not force_resync) and row.id in self.device_on_book_ids:
                     continue
                 if not row.download_url:
                     continue
@@ -1937,18 +2256,19 @@ class HearthMainWindow(QMainWindow):
                     source_feeds=source_feeds,
                 )
 
-        for record in self.metadata_records.values():
-            if not (record.desired or record.on_device):
-                continue
-            if not record.collection_feeds:
-                continue
-            if not any(
-                feed in selected_scope_feeds for feed in record.collection_feeds
-            ):
-                continue
-            if record.id in available_selected_ids:
-                continue
-            remove_ids.add(record.id)
+        if not force_resync:
+            for record in self.metadata_records.values():
+                if not (record.desired or record.on_device):
+                    continue
+                if not record.collection_feeds:
+                    continue
+                if not any(
+                    feed in selected_scope_feeds for feed in record.collection_feeds
+                ):
+                    continue
+                if record.id in available_selected_ids:
+                    continue
+                remove_ids.add(record.id)
 
         for record_id in remove_ids:
             add_by_id.pop(record_id, None)
@@ -1968,7 +2288,8 @@ class HearthMainWindow(QMainWindow):
             return
 
         self._refresh_device_library_state()
-        add_items, remove_ids = self._planned_sync_actions()
+        force_resync = self.force_checkbox.isChecked()
+        add_items, remove_ids = self._planned_sync_actions(force_resync=force_resync)
         if not add_items and not remove_ids:
             QMessageBox.information(
                 self,
@@ -1989,7 +2310,6 @@ class HearthMainWindow(QMainWindow):
             )
             return
         root = self.connected_device.root
-        force_resync = self.force_checkbox.isChecked()
         total_actions = len(add_items) + len(remove_ids)
 
         self.sync_progress_queue = SimpleQueue()
@@ -2059,6 +2379,7 @@ class HearthMainWindow(QMainWindow):
             settings.kcc_manga_default,
             settings.kcc_manga_force,
             settings.kcc_autolevel,
+            settings.kcc_preserve_margin_percent,
             settings.calibre_command,
         )
         device = KindleDevice.probe(
@@ -2071,6 +2392,7 @@ class HearthMainWindow(QMainWindow):
             device=device,
             workspace=workspace,
             max_conversion_workers=settings.max_conversion_workers,
+            convert_pdfs=settings.convert_pdfs,
         )
 
         if self.sync_progress_queue is not None:
@@ -2691,6 +3013,8 @@ class HearthMainWindow(QMainWindow):
         self.refresh_files_button.setEnabled(False)
         self.download_selected_file_button.setEnabled(False)
         self.delete_selected_file_button.setEnabled(False)
+        self.regenerate_metadata_button.setEnabled(False)
+        self.remove_from_kindle_button.setEnabled(False)
         self.probe_kindle_button.setEnabled(False)
 
     def _set_idle(self) -> None:
@@ -2706,6 +3030,8 @@ class HearthMainWindow(QMainWindow):
         self.refresh_files_button.setEnabled(True)
         self.download_selected_file_button.setEnabled(True)
         self.delete_selected_file_button.setEnabled(True)
+        self.regenerate_metadata_button.setEnabled(True)
+        self.remove_from_kindle_button.setEnabled(True)
         self.probe_kindle_button.setEnabled(True)
 
     def _log(self, message: str) -> None:

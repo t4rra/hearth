@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         settings.kcc_manga_default,
         settings.kcc_manga_force,
         settings.kcc_autolevel,
+        settings.kcc_preserve_margin_percent,
         settings.calibre_command,
     )
     device = KindleDevice.probe(
@@ -70,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         device=device,
         workspace=Path(args.workspace),
         max_conversion_workers=settings.max_conversion_workers,
+        convert_pdfs=settings.convert_pdfs,
     )
 
     items = _discover_items(client, feed_url)

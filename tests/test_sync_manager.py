@@ -7,7 +7,7 @@ import time
 
 from hearth.core.opds import OPDSSession
 from hearth.core.settings import Settings
-from hearth.sync.device import KindleDevice
+from hearth.sync.device import DeviceFile, KindleDevice
 from hearth.sync.manager import SyncItem, SyncManager
 from hearth.sync.metadata import load_metadata
 
@@ -21,6 +21,55 @@ class FakeSession(OPDSSession):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(self.file_map[url].read_bytes())
         return target
+
+
+class FakeMTPDevice(KindleDevice):
+    def ensure_layout(self) -> None:
+        return
+
+    def put_file(self, local_path: Path, remote_name: str) -> Path:
+        remote_path = self.documents_dir / remote_name
+        remote_path.parent.mkdir(parents=True, exist_ok=True)
+        remote_path.write_bytes(local_path.read_bytes())
+        return remote_path
+
+    def download_file(self, remote_name: str, destination: Path) -> Path:
+        source = self.documents_dir / remote_name
+        if not source.exists():
+            raise RuntimeError(f"Remote MTP file not found: {remote_name}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+        return destination
+
+    def list_files(self):
+        rows = []
+        if not self.documents_dir.exists():
+            return rows
+        for path in self.documents_dir.rglob("*"):
+            rows.append(
+                DeviceFile(
+                    name=path.name,
+                    path=path.relative_to(self.documents_dir).as_posix(),
+                    size=path.stat().st_size,
+                    is_dir=path.is_dir(),
+                )
+            )
+        return rows
+
+    def delete_file(self, remote_name: str) -> bool:
+        target = self.documents_dir / remote_name
+        if not target.exists():
+            return False
+        if target.is_dir():
+            for child in sorted(target.rglob("*"), reverse=True):
+                if child.is_dir():
+                    child.rmdir()
+                else:
+                    child.unlink()
+            target.rmdir()
+        else:
+            target.unlink()
+        return True
 
 
 @dataclass(slots=True)
@@ -94,6 +143,25 @@ class SlowConverters(FakeConverters):
                 self._active -= 1
 
 
+class WritesThenFailsConverters(FakeConverters):
+    def convert_for_kindle(
+        self,
+        source: Path,
+        destination_dir: Path,
+        stem: str,
+        title: str = "",
+        author: str = "",
+        kcc_device_hint: str = "",
+        progress_callback=None,
+        declared_type: str = "",
+    ) -> FakeConversionResult:
+        _ = (title, author, kcc_device_hint, progress_callback, declared_type)
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        output = destination_dir / f"{stem}.epub"
+        output.write_bytes(source.read_bytes())
+        raise RuntimeError("converter failed after creating output")
+
+
 def test_sync_is_idempotent(tmp_path: Path, sample_epub_path: Path) -> None:
     device = KindleDevice("usb", tmp_path / "device")
     manager = SyncManager(
@@ -116,6 +184,41 @@ def test_sync_is_idempotent(tmp_path: Path, sample_epub_path: Path) -> None:
 
     assert first.synced == 1
     assert second.skipped == 1
+
+
+def test_sync_cleans_up_staging_and_keeps_metadata_on_device(
+    tmp_path: Path,
+    sample_epub_path: Path,
+) -> None:
+    device = FakeMTPDevice(transport="mtp", root=tmp_path / "kindle")
+    manager = SyncManager(
+        session=FakeSession({"https://example.test/book.epub": sample_epub_path}),
+        converters=FakeConverters(),
+        device=device,
+        workspace=tmp_path / "workspace",
+    )
+    item = SyncItem(
+        id="book-1",
+        title="Book One",
+        download_url="https://example.test/book.epub",
+        declared_type="application/epub+zip",
+    )
+
+    first = manager.sync([item])
+    second = manager.sync([item])
+
+    assert first.synced == 1
+    assert second.skipped == 1
+
+    workspace = tmp_path / "workspace"
+    assert not (workspace / "downloads").exists()
+    assert not (workspace / "converted").exists()
+    assert not (workspace / ".hearth_metadata.mtp.json").exists()
+
+    metadata_path = device.documents_dir / "Hearth" / ".hearth_metadata.json"
+    assert metadata_path.exists()
+    records = load_metadata(metadata_path)
+    assert records["book-1"].on_device is True
 
 
 def test_stale_state_is_reconciled(
@@ -200,6 +303,35 @@ def test_pdf_files_are_transferred_directly(tmp_path: Path) -> None:
     assert remote_path.exists()
 
 
+def test_pdf_files_are_converted_when_enabled(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%EOF")
+    device = KindleDevice("usb", tmp_path / "device")
+    converters = FakeConverters()
+    manager = SyncManager(
+        session=FakeSession({"https://example.test/book.pdf": pdf_path}),
+        converters=converters,
+        device=device,
+        workspace=tmp_path / "workspace",
+        convert_pdfs=True,
+    )
+
+    item = SyncItem(
+        id="book-pdf",
+        title="Book PDF",
+        download_url="https://example.test/book.pdf",
+        declared_type="application/pdf",
+    )
+
+    manager.sync([item])
+
+    # converter should have been invoked for PDF when enabled
+    assert converters.last_source is not None
+
+    remote_path = device.documents_dir / "Hearth" / "Book PDF.epub"
+    assert remote_path.exists()
+
+
 def test_sync_can_convert_in_parallel(tmp_path: Path, sample_epub_path: Path) -> None:
     converters = SlowConverters()
     manager = SyncManager(
@@ -258,3 +390,62 @@ def test_mark_deleted_removes_record_on_success(
     assert manager.mark_deleted_on_device("book-1") is True
     records = load_metadata(manager.metadata_path)
     assert "book-1" not in records
+
+
+def test_force_resync_treats_on_device_as_empty(
+    tmp_path: Path,
+    sample_epub_path: Path,
+) -> None:
+    device = KindleDevice("usb", tmp_path / "device")
+    manager = SyncManager(
+        session=FakeSession({"https://example.test/book.epub": sample_epub_path}),
+        converters=FakeConverters(),
+        device=device,
+        workspace=tmp_path / "workspace",
+    )
+    item = SyncItem(
+        id="book-1",
+        title="Book One",
+        download_url="https://example.test/book.epub",
+        declared_type="application/epub+zip",
+    )
+
+    first = manager.sync([item])
+    second = manager.sync([item], force_resync=True)
+
+    assert first.synced == 1
+    assert second.synced == 1
+    assert second.skipped == 0
+
+
+def test_failed_conversion_output_is_not_uploaded_and_metadata_reflects_failure(
+    tmp_path: Path,
+    sample_epub_path: Path,
+) -> None:
+    device = KindleDevice("usb", tmp_path / "device")
+    manager = SyncManager(
+        session=FakeSession({"https://example.test/book.epub": sample_epub_path}),
+        converters=WritesThenFailsConverters(),
+        device=device,
+        workspace=tmp_path / "workspace",
+    )
+    item = SyncItem(
+        id="book-1",
+        title="Book One",
+        download_url="https://example.test/book.epub",
+        declared_type="application/epub+zip",
+    )
+
+    outcome = manager.sync([item])
+
+    assert outcome.synced == 0
+    assert outcome.failed == 1
+
+    # Even if converter emitted a file before failing, it must not be uploaded.
+    remote_path = device.documents_dir / "Hearth" / "Book One.epub"
+    assert not remote_path.exists()
+
+    records = load_metadata(manager.metadata_path)
+    record = records["book-1"]
+    assert record.desired is True
+    assert record.on_device is False
