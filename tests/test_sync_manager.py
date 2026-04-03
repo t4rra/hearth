@@ -162,6 +162,17 @@ class WritesThenFailsConverters(FakeConverters):
         raise RuntimeError("converter failed after creating output")
 
 
+class FlakyUploadDevice(KindleDevice):
+    def __init__(self, *args, fail_on_remote_name: str = "", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fail_on_remote_name = fail_on_remote_name
+
+    def put_file(self, local_path: Path, remote_name: str) -> Path:
+        if remote_name == self.fail_on_remote_name:
+            raise RuntimeError("upload failed during partial transfer")
+        return super().put_file(local_path, remote_name)
+
+
 def test_sync_is_idempotent(tmp_path: Path, sample_epub_path: Path) -> None:
     device = KindleDevice("usb", tmp_path / "device")
     manager = SyncManager(
@@ -449,3 +460,50 @@ def test_failed_conversion_output_is_not_uploaded_and_metadata_reflects_failure(
     record = records["book-1"]
     assert record.desired is True
     assert record.on_device is False
+
+
+def test_partial_upload_failure_keeps_successful_records(
+    tmp_path: Path,
+    sample_epub_path: Path,
+) -> None:
+    device = FlakyUploadDevice(
+        transport="usb",
+        root=tmp_path / "device",
+        fail_on_remote_name="Hearth/Book Two.epub",
+    )
+    manager = SyncManager(
+        session=FakeSession(
+            {
+                "https://example.test/book-1.epub": sample_epub_path,
+                "https://example.test/book-2.epub": sample_epub_path,
+            }
+        ),
+        converters=FakeConverters(),
+        device=device,
+        workspace=tmp_path / "workspace",
+    )
+
+    outcome = manager.sync(
+        [
+            SyncItem(
+                id="book-1",
+                title="Book One",
+                download_url="https://example.test/book-1.epub",
+                declared_type="application/epub+zip",
+            ),
+            SyncItem(
+                id="book-2",
+                title="Book Two",
+                download_url="https://example.test/book-2.epub",
+                declared_type="application/epub+zip",
+            ),
+        ]
+    )
+
+    assert outcome.synced == 1
+    assert outcome.failed == 1
+
+    records = load_metadata(manager.metadata_path)
+    assert records["book-1"].on_device is True
+    assert records["book-2"].desired is True
+    assert records["book-2"].on_device is False

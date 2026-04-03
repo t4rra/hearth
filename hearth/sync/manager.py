@@ -16,6 +16,7 @@ from .device import KindleDevice
 from .metadata import (
     SyncRecord,
     load_metadata,
+    merge_device_files_into_records,
     reconcile_on_device,
     save_metadata,
     upsert_record,
@@ -104,15 +105,33 @@ class SyncManager:
 
     def _load_metadata_records(self) -> dict[str, SyncRecord]:
         if self.device.transport != "mtp":
-            return load_metadata(self.metadata_path)
+            records = load_metadata(self.metadata_path)
+            try:
+                device_files = {
+                    entry.path
+                    for entry in self.device.list_files()
+                    if not entry.is_dir
+                }
+            except (OSError, RuntimeError):
+                return records
+            return merge_device_files_into_records(records, device_files)
 
         with tempfile.TemporaryDirectory(prefix="hearth-metadata-") as temp_dir:
             temp_path = Path(temp_dir) / ".hearth_metadata.json"
             try:
                 self.device.download_file(self._metadata_remote_name(), temp_path)
             except (OSError, RuntimeError):
-                return {}
-            return load_metadata(temp_path)
+                records = {}
+            else:
+                records = load_metadata(temp_path)
+
+        try:
+            device_files = {
+                entry.path for entry in self.device.list_files() if not entry.is_dir
+            }
+        except (OSError, RuntimeError):
+            return records
+        return merge_device_files_into_records(records, device_files)
 
     def _save_metadata_records(self, records: dict[str, SyncRecord]) -> None:
         if self.device.transport != "mtp":
@@ -323,23 +342,46 @@ class SyncManager:
                     f"[{order}/{len(items)}] uploading: {remote_name}",
                     is_log=True,
                 )
-                self.device.put_file(converted.output, remote_name)
-
-                upsert_record(
-                    records=records,
-                    book_id=item.id,
-                    title=item.title,
-                    desired=True,
-                    on_device=True,
-                    device_filename=remote_name,
-                    collection_feeds=item.source_feeds,
-                )
-                outcome.synced += 1
-                emit(
-                    order,
-                    f"[{order}/{len(items)}] synced: {item.title}",
-                    is_log=True,
-                )
+                previous = records.get(item.id)
+                try:
+                    self.device.put_file(converted.output, remote_name)
+                except Exception as exc:
+                    outcome.failed += 1
+                    emit(
+                        order,
+                        (
+                            f"[{order}/{len(items)}] failed upload: "
+                            f"{item.title} ({exc})"
+                        ),
+                        is_log=True,
+                    )
+                    upsert_record(
+                        records=records,
+                        book_id=item.id,
+                        title=item.title,
+                        desired=True,
+                        on_device=previous.on_device if previous is not None else False,
+                        device_filename=(
+                            previous.device_filename if previous is not None else ""
+                        ),
+                        collection_feeds=item.source_feeds,
+                    )
+                else:
+                    upsert_record(
+                        records=records,
+                        book_id=item.id,
+                        title=item.title,
+                        desired=True,
+                        on_device=True,
+                        device_filename=remote_name,
+                        collection_feeds=item.source_feeds,
+                    )
+                    outcome.synced += 1
+                    emit(
+                        order,
+                        f"[{order}/{len(items)}] synced: {item.title}",
+                        is_log=True,
+                    )
 
                 try:
                     converted.output.unlink(missing_ok=True)
@@ -360,7 +402,9 @@ class SyncManager:
                     desired=True,
                     on_device=previous.on_device if previous is not None else False,
                     device_filename=(
-                        previous.device_filename if previous is not None else ""
+                        previous.device_filename
+                        if previous is not None
+                        else ""
                     ),
                     collection_feeds=item.source_feeds,
                 )

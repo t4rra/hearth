@@ -15,6 +15,22 @@ class SyncRecord:
     collection_feeds: list[str] = field(default_factory=list)
 
 
+def _is_device_file_artifact(device_filename: str) -> bool:
+    normalized = device_filename.strip("/")
+    if not normalized:
+        return True
+
+    path = Path(normalized)
+    if path.name in {
+        ".hearth_metadata.json",
+        ".hearth_collection_cache.json",
+    }:
+        return True
+    if normalized.endswith(".sdr"):
+        return True
+    return False
+
+
 def load_metadata(path: Path) -> dict[str, SyncRecord]:
     if not path.exists():
         return {}
@@ -49,6 +65,50 @@ def reconcile_on_device(
             device_filename=record.device_filename,
             collection_feeds=list(record.collection_feeds),
         )
+    return reconciled
+
+
+def merge_device_files_into_records(
+    records: dict[str, SyncRecord],
+    device_files: set[str],
+) -> dict[str, SyncRecord]:
+    reconciled = reconcile_on_device(records, device_files)
+    known_device_filenames = {
+        record.device_filename
+        for record in reconciled.values()
+        if record.device_filename
+    }
+
+    for device_file in sorted(device_files):
+        normalized = device_file.strip("/")
+        if _is_device_file_artifact(normalized):
+            continue
+
+        path = Path(normalized)
+        parts = path.parts
+        if "Hearth" not in parts:
+            continue
+
+        if normalized in known_device_filenames:
+            continue
+
+        record_id = f"device:{normalized}"
+        if record_id in reconciled:
+            suffix = 2
+            while f"{record_id}:{suffix}" in reconciled:
+                suffix += 1
+            record_id = f"{record_id}:{suffix}"
+
+        reconciled[record_id] = SyncRecord(
+            id=record_id,
+            title=path.stem or path.name,
+            desired=True,
+            on_device=True,
+            device_filename=normalized,
+            collection_feeds=[],
+        )
+        known_device_filenames.add(normalized)
+
     return reconciled
 
 

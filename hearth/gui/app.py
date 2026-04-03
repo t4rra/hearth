@@ -50,6 +50,7 @@ from hearth.sync.manager import SyncItem, SyncManager, SyncProgress
 from hearth.sync.metadata import (
     SyncRecord,
     load_metadata,
+    merge_device_files_into_records,
     reconcile_on_device,
     save_metadata,
 )
@@ -691,15 +692,29 @@ class HearthMainWindow(QMainWindow):
 
     def _load_metadata_from_device(self, device: KindleDevice) -> dict[str, SyncRecord]:
         if device.transport != "mtp":
-            return load_metadata(self._metadata_path_for(device))
+            records = load_metadata(self._metadata_path_for(device))
+            try:
+                device_files = {
+                    entry.path for entry in device.list_files() if not entry.is_dir
+                }
+            except (OSError, RuntimeError):
+                return records
+            return merge_device_files_into_records(records, device_files)
 
         with tempfile.TemporaryDirectory(prefix="hearth-metadata-") as temp_dir:
             temp_path = Path(temp_dir) / ".hearth_metadata.json"
             try:
                 device.download_file(self._metadata_remote_name(), temp_path)
             except (OSError, RuntimeError):
-                return {}
-            return load_metadata(temp_path)
+                records = {}
+            else:
+                records = load_metadata(temp_path)
+
+        try:
+            device_files = {entry.path for entry in device.list_files() if not entry.is_dir}
+        except (OSError, RuntimeError):
+            return records
+        return merge_device_files_into_records(records, device_files)
 
     def _save_metadata_to_device(
         self,

@@ -5,6 +5,7 @@ from pathlib import Path
 from hearth.sync.metadata import (
     SyncRecord,
     load_metadata,
+    merge_device_files_into_records,
     reconcile_on_device,
     save_metadata,
     upsert_record,
@@ -75,3 +76,21 @@ def test_upsert_record_tracks_collection_feeds() -> None:
         "https://example.test/series",
         "https://example.test/all",
     ]
+
+
+def test_merge_device_files_adds_missing_hearth_records() -> None:
+    records = {}
+    device_files = {
+        "Hearth/Book One.epub",
+        "Hearth/.hearth_metadata.json",
+        "Hearth/.hearth_collection_cache.json",
+    }
+
+    merged = merge_device_files_into_records(records, device_files)
+
+    book_records = [
+        record for record in merged.values() if record.device_filename == "Hearth/Book One.epub"
+    ]
+    assert len(book_records) == 1
+    assert book_records[0].desired is True
+    assert book_records[0].on_device is True
