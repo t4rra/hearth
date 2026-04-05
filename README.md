@@ -2,9 +2,9 @@
 
 Hearth is a macOS desktop app for syncing books from an OPDS catalog to a Kindle.
 
-The primary install path is now the installer script.
-
 ## Recommended Install (macOS)
+
+> Homebrew is required for the installer to work. 
 
 1. Clone the repository.
 
@@ -21,23 +21,13 @@ cd hearth
 
 3. Launch Hearth from Finder at `~/Applications/Hearth.app`.
 
-## What The Installer Does
+## Dependencies
+- Homebrew (for installing dependencies)
 
-The installer is intended to be end-to-end for GUI users.
-
-- Checks for Homebrew and stops with instructions if Homebrew is missing.
-- Installs required Homebrew dependencies:
-  - `go`
-  - `libusb`
-  - `pkg-config`
-  - `calibre` (cask)
-- Clones (or updates) KCC to `~/.hearth/vendor/kcc`.
-- Copies MTP bridge sources to `~/.hearth/vendor/mtpx_bridge` for reliable runtime builds.
-- Creates a private Python virtual environment at `~/.hearth/app/venv`.
-- Installs Hearth and KCC Python package dependencies into that environment.
-- Creates a Finder-launchable app bundle at `~/Applications/Hearth.app`.
-- Cleans source-tree build artifacts not needed after install (`build/`, `dist/`, `hearth.egg-info`).
-- Configures launcher environment so Homebrew tools are discoverable from Finder launches.
+> The following should be installed automatically by the installer
+- [Calibre](https://github.com/kovidgoyal/calibre) (for ebook-convert tool used in sync)
+- [Kindle Comic Converter (KCC)](https://github.com/ciromattia/kcc)
+- [go-mtpx](https://github.com/ganeshrvel/go-mtpx)
 
 ## Uninstall (Full Removal)
 
@@ -47,27 +37,10 @@ Run the uninstaller to remove Hearth app + Hearth data directory (`~/.hearth`):
 ./scripts/uninstall_Hearth.sh
 ```
 
-In interactive mode, the uninstaller will ask whether you want to keep
-your local settings file (`~/.hearth/settings.json`).
-
-Non-interactive mode:
-
-```bash
-./scripts/uninstall_Hearth.sh --yes
-```
-
-`--yes` skips prompts and performs full removal of `~/.hearth`.
-
 Optional: also remove Homebrew dependencies that the installer uses:
 
 ```bash
 ./scripts/uninstall_Hearth.sh --remove-brew-deps
-```
-
-With both options:
-
-```bash
-./scripts/uninstall_Hearth.sh --yes --remove-brew-deps
 ```
 
 ## Notes
@@ -75,36 +48,44 @@ With both options:
 - The app bundle created by this script is not signed/notarized.
 - Depending on macOS Gatekeeper behavior, first launch may still require
   an allow/open confirmation.
-- The private virtual environment is only used when launching Hearth;
-  it does not run in the background by itself.
 
-## GUI Flow
+## Setup
 
-- On startup, Hearth probes for a connected Kindle and displays status.
-- On startup, Hearth attempts to reach OPDS and lazy-loads the first collection layer.
-- Configure OPDS auth and transport in the `Settings` tab.
-- Use the `Library` tab to browse/select books and sync.
-- Use the `Kindle Files` tab to browse, download, and delete files on device.
+1. Select your kindle device
+2. Select your connection protocol (MTP or USB)
+3. Settings may be imported from your Kindle if you have previously used Hearth, or you can start fresh
+4. Enter your OPDS server feed URL and credentials if required
+5. It is recommend to visit the settings page and configure the rest before syncing
 
 ## CLI (Optional)
 
-Hearth includes a CLI (`hearth`) for automation/headless workflows.
-The GUI does not shell out to the CLI; both call shared sync logic directly.
+Hearth includes a CLI (`hearth`) for automation/headless workflows. This is a leftover from development and is not the primary interface, but it can be used for scripting or debugging. May be modified or removed in the future.
+```
+➜ hearth --help
+usage: hearth [-h] [--settings SETTINGS] [--workspace WORKSPACE] [--feed-url FEED_URL] [--kindle-root KINDLE_ROOT] [--force] [--dry-run]
 
-Dry-run discovery:
+Sync OPDS books to Kindle
 
-```bash
-~/.hearth/app/venv/bin/hearth --feed-url "https://your-opds-server.example/opds" --dry-run
+options:
+  -h, --help            show this help message and exit
+  --settings SETTINGS
+  --workspace WORKSPACE
+  --feed-url FEED_URL
+  --kindle-root KINDLE_ROOT
+  --force
+  --dry-run
 ```
 
 ## Development / Tests
 
-If you are developing Hearth itself:
+To run the GUI from the command line, first install the dependencies in a virtual environment, then run `hearth`:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-pip install pytest
-pytest
+hearth-gui
 ```
+## Disclaimer
+I made Hearth with LLMs and have only bothered to test it on my own machine with my own Kindle. It may not work for you, and there may be bugs and security issues. I probably won't be of much help either :) 
+
