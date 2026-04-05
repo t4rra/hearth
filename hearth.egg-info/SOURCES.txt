@@ -25,6 +25,8 @@ hearth/sync/__init__.py
 hearth/sync/device.py
 hearth/sync/manager.py
 hearth/sync/metadata.py
+hearth/sync/mtp_backend.py
+tests/test_converters.py
 tests/test_detection.py
 tests/test_device.py
 tests/test_metadata.py

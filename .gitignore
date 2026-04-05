@@ -3,6 +3,7 @@
 .mypy_cache
 __pycache__
 *.pyc
-TESTING FILES
 hearth/sync/mtpx_bridge/.build/hearth-mtpx-bridge
-KCC Options
+.DS_Store
+hearth.egg-info
+build
