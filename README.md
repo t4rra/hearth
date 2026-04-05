@@ -87,5 +87,5 @@ pip install -e .
 hearth-gui
 ```
 ## Disclaimer
-I made Hearth with LLMs and have only bothered to test it on my own machine with my own Kindle. It may not work for you, and there may be bugs and security issues. I probably won't be of much help either :) 
+I made Hearth with LLMs and have only bothered to test it on my own machine (ARM Mac) with my own Kindle (Scribe 2022). It may not work for you, and there may be bugs and security issues. I probably won't be of much help either :) 
 
