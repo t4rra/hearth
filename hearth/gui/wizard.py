@@ -104,7 +104,9 @@ class SetupWizard(QWizard):
         layout.addStretch(1)
         page.setLayout(layout)
 
-        self.kindle_model_combo.currentIndexChanged.connect(self._on_kindle_model_changed)
+        self.kindle_model_combo.currentIndexChanged.connect(
+            self._on_kindle_model_changed
+        )
         self.addPage(page)
 
     def _setup_opds_page(self) -> None:
