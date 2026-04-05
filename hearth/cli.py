@@ -72,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
         workspace=Path(args.workspace),
         max_conversion_workers=settings.max_conversion_workers,
         convert_pdfs=settings.convert_pdfs,
+        settings_path=settings_path,
+        selected_collections=settings.collection_sync_feeds,
     )
 
     items = _discover_items(client, feed_url)

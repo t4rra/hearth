@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import json
 import threading
 import time
 
@@ -9,7 +10,6 @@ from hearth.core.opds import OPDSSession
 from hearth.core.settings import Settings
 from hearth.sync.device import DeviceFile, KindleDevice
 from hearth.sync.manager import SyncItem, SyncManager
-from hearth.sync.metadata import load_metadata
 
 
 class FakeSession(OPDSSession):
@@ -226,10 +226,11 @@ def test_sync_cleans_up_staging_and_keeps_metadata_on_device(
     assert not (workspace / "converted").exists()
     assert not (workspace / ".hearth_metadata.mtp.json").exists()
 
-    metadata_path = device.documents_dir / "Hearth" / ".hearth_metadata.json"
+    metadata_path = device.documents_dir / "Hearth" / ".hearth_collection_cache.json"
     assert metadata_path.exists()
-    records = load_metadata(metadata_path)
-    assert records["book-1"].on_device is True
+    raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert "book-1" in raw.get("books", {})
+    assert raw["books"]["book-1"]["on_device"] is True
 
 
 def test_stale_state_is_reconciled(
@@ -399,8 +400,9 @@ def test_mark_deleted_removes_record_on_success(
     manager.sync([item])
 
     assert manager.mark_deleted_on_device("book-1") is True
-    records = load_metadata(manager.metadata_path)
-    assert "book-1" not in records
+    cache_path = device.documents_dir / "Hearth" / ".hearth_collection_cache.json"
+    raw = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert "book-1" not in raw.get("books", {})
 
 
 def test_force_resync_treats_on_device_as_empty(
@@ -456,10 +458,11 @@ def test_failed_conversion_output_is_not_uploaded_and_metadata_reflects_failure(
     remote_path = device.documents_dir / "Hearth" / "Book One.epub"
     assert not remote_path.exists()
 
-    records = load_metadata(manager.metadata_path)
-    record = records["book-1"]
-    assert record.desired is True
-    assert record.on_device is False
+    cache_path = device.documents_dir / "Hearth" / ".hearth_collection_cache.json"
+    raw = json.loads(cache_path.read_text(encoding="utf-8"))
+    record = raw["books"]["book-1"]
+    assert record["desired"] is True
+    assert record["on_device"] is False
 
 
 def test_partial_upload_failure_keeps_successful_records(
@@ -503,7 +506,43 @@ def test_partial_upload_failure_keeps_successful_records(
     assert outcome.synced == 1
     assert outcome.failed == 1
 
-    records = load_metadata(manager.metadata_path)
-    assert records["book-1"].on_device is True
-    assert records["book-2"].desired is True
-    assert records["book-2"].on_device is False
+    cache_path = device.documents_dir / "Hearth" / ".hearth_collection_cache.json"
+    raw = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert raw["books"]["book-1"]["on_device"] is True
+    assert raw["books"]["book-2"]["desired"] is True
+    assert raw["books"]["book-2"]["on_device"] is False
+
+
+def test_collection_cache_stores_selected_collections_snapshot(
+    tmp_path: Path,
+    sample_epub_path: Path,
+) -> None:
+    device = KindleDevice("usb", tmp_path / "device")
+    manager = SyncManager(
+        session=FakeSession({"https://example.test/book.epub": sample_epub_path}),
+        converters=FakeConverters(),
+        device=device,
+        workspace=tmp_path / "workspace",
+        selected_collections=[
+            "https://example.test/opds/series-a",
+            "https://example.test/opds/series-b",
+        ],
+    )
+    item = SyncItem(
+        id="book-1",
+        title="Book One",
+        download_url="https://example.test/book.epub",
+        declared_type="application/epub+zip",
+        source_feeds=["https://example.test/opds/series-a"],
+    )
+
+    manager.sync([item])
+
+    cache_path = device.documents_dir / "Hearth" / ".hearth_collection_cache.json"
+    raw = json.loads(cache_path.read_text(encoding="utf-8"))
+
+    assert raw["collections"] == {
+        "/opds/series-a": ["book-1"],
+        "/opds/series-b": [],
+    }
+    assert "collection_feeds" not in raw["books"]["book-1"]

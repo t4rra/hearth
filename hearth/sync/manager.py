@@ -8,6 +8,8 @@ from typing import Callable, Protocol
 import urllib.parse
 import shutil
 
+import json
+
 from hearth.converters.detection import COMIC_EXTENSIONS, infer_extension
 from hearth.core.opds import OPDSSession
 from hearth.core.settings import sanitize_filename
@@ -15,10 +17,7 @@ from hearth.core.settings import sanitize_filename
 from .device import KindleDevice
 from .metadata import (
     SyncRecord,
-    load_metadata,
-    merge_device_files_into_records,
     reconcile_on_device,
-    save_metadata,
     upsert_record,
 )
 
@@ -89,6 +88,7 @@ class SyncManager:
         max_conversion_workers: int = 1,
         convert_pdfs: bool = False,
         settings_path: Path | None = None,
+        selected_collections: list[str] | None = None,
     ):
         self.session = session
         self.converters = converters
@@ -97,54 +97,148 @@ class SyncManager:
         self.max_conversion_workers = max(1, int(max_conversion_workers))
         self.convert_pdfs = bool(convert_pdfs)
         self.settings_path = settings_path
+        self.selected_collections = [
+            feed.strip()
+            for feed in (selected_collections or [])
+            if isinstance(feed, str) and feed.strip()
+        ]
 
     @property
-    def metadata_path(self) -> Path:
-        return self.device.documents_dir / "Hearth" / ".hearth_metadata.json"
+    def collection_cache_path(self) -> Path:
+        return self.device.documents_dir / "Hearth" / ".hearth_collection_cache.json"
 
-    def _metadata_remote_name(self) -> str:
-        return "Hearth/.hearth_metadata.json"
+    def _collection_cache_remote_name(self) -> str:
+        return "Hearth/.hearth_collection_cache.json"
+
+    def _cache_key_for_feed(self, feed_url: str) -> str:
+        base_url = self.session.settings.opds_url.strip()
+        parsed = urllib.parse.urlparse(feed_url)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        if not base_url:
+            return path
+
+        base_parsed = urllib.parse.urlparse(base_url)
+        if parsed.scheme == base_parsed.scheme and parsed.netloc == base_parsed.netloc:
+            return path
+        return feed_url
 
     def _settings_remote_name(self) -> str:
         return "Hearth/.hearth_settings.json"
 
-    def _load_metadata_records(self) -> dict[str, SyncRecord]:
+    def _load_collection_cache(self) -> dict[str, SyncRecord]:
+        """Load cached records from collection cache file."""
         if self.device.transport != "mtp":
-            records = load_metadata(self.metadata_path)
+            cache_path = self.collection_cache_path
+            if not cache_path.exists():
+                return {}
             try:
-                device_files = {
-                    entry.path for entry in self.device.list_files() if not entry.is_dir
-                }
-            except (OSError, RuntimeError):
-                return records
-            return merge_device_files_into_records(records, device_files)
+                raw = json.loads(cache_path.read_text(encoding="utf-8"))
+                return self._parse_cache_records(raw)
+            except (OSError, json.JSONDecodeError):
+                return {}
 
-        with tempfile.TemporaryDirectory(prefix="hearth-metadata-") as temp_dir:
-            temp_path = Path(temp_dir) / ".hearth_metadata.json"
+        with tempfile.TemporaryDirectory(prefix="hearth-collection-cache-") as temp_dir:
+            temp_path = Path(temp_dir) / ".hearth_collection_cache.json"
             try:
-                self.device.download_file(self._metadata_remote_name(), temp_path)
-            except (OSError, RuntimeError):
-                records = {}
-            else:
-                records = load_metadata(temp_path)
+                self.device.download_file(self._collection_cache_remote_name(), temp_path)
+                raw = json.loads(temp_path.read_text(encoding="utf-8"))
+                return self._parse_cache_records(raw)
+            except (OSError, RuntimeError, json.JSONDecodeError):
+                return {}
 
-        try:
-            device_files = {
-                entry.path for entry in self.device.list_files() if not entry.is_dir
-            }
-        except (OSError, RuntimeError):
+    def _parse_cache_records(self, cache_data: object) -> dict[str, SyncRecord]:
+        """Parse SyncRecords from collection cache format."""
+        records: dict[str, SyncRecord] = {}
+        if not isinstance(cache_data, dict):
             return records
-        return merge_device_files_into_records(records, device_files)
 
-    def _save_metadata_records(self, records: dict[str, SyncRecord]) -> None:
+        feed_by_book_id: dict[str, set[str]] = {}
+        collections_dict = cache_data.get("collections", {})
+        if isinstance(collections_dict, dict):
+            for feed, raw_ids in collections_dict.items():
+                if not isinstance(feed, str):
+                    continue
+                if isinstance(raw_ids, dict):
+                    ids_list = raw_ids.get("book_ids", [])
+                else:
+                    ids_list = raw_ids
+                if not isinstance(ids_list, list):
+                    continue
+                for raw_id in ids_list:
+                    book_id = str(raw_id).strip()
+                    if not book_id:
+                        continue
+                    feed_by_book_id.setdefault(book_id, set()).add(
+                        self._cache_key_for_feed(feed)
+                    )
+
+        books_dict = cache_data.get("books", {})
+        if isinstance(books_dict, dict):
+            for book_id, book_data in books_dict.items():
+                if not isinstance(book_data, dict):
+                    continue
+                persisted_feeds = [
+                    str(f)
+                    for f in book_data.get("collection_feeds", [])
+                    if isinstance(f, str) and f.strip()
+                ]
+                records[book_id] = SyncRecord(
+                    id=book_id,
+                    title=book_data.get("title", ""),
+                    desired=bool(book_data.get("desired", False)),
+                    on_device=bool(book_data.get("on_device", False)),
+                    device_filename=str(book_data.get("device_filename", "")),
+                    collection_feeds=sorted(
+                        set(persisted_feeds).union(feed_by_book_id.get(book_id, set()))
+                    ),
+                )
+        return records
+
+    def _build_cache_payload(self, records: dict[str, SyncRecord]) -> dict:
+        """Build the unified collection cache payload."""
+        books_payload: dict[str, dict] = {}
+        collections_payload: dict[str, list[str]] = {}
+
+        for record in records.values():
+            books_payload[record.id] = {
+                "title": record.title,
+                "desired": record.desired,
+                "on_device": record.on_device,
+                "device_filename": record.device_filename,
+            }
+            for feed in record.collection_feeds:
+                key = self._cache_key_for_feed(feed)
+                collections_payload.setdefault(key, []).append(record.id)
+
+        for feed in self.selected_collections:
+            key = self._cache_key_for_feed(feed)
+            collections_payload.setdefault(key, [])
+
+        return {
+            "books": books_payload,
+            "collections": {
+                k: sorted(set(v)) for k, v in sorted(collections_payload.items())
+            },
+        }
+
+    def _save_collection_cache(self, records: dict[str, SyncRecord]) -> None:
+        """Save collection cache to device."""
+        payload = self._build_cache_payload(records)
+
         if self.device.transport != "mtp":
-            save_metadata(self.metadata_path, records)
+            try:
+                self.collection_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                self.collection_cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except OSError:
+                pass
             return
 
-        with tempfile.TemporaryDirectory(prefix="hearth-metadata-") as temp_dir:
-            temp_path = Path(temp_dir) / ".hearth_metadata.json"
-            save_metadata(temp_path, records)
-            self.device.put_file(temp_path, self._metadata_remote_name())
+        with tempfile.TemporaryDirectory(prefix="hearth-collection-cache-") as temp_dir:
+            temp_path = Path(temp_dir) / ".hearth_collection_cache.json"
+            temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            self.device.put_file(temp_path, self._collection_cache_remote_name())
 
     def _cleanup_staging_directories(self) -> None:
         for path in (self.workspace / "downloads", self.workspace / "converted"):
@@ -184,7 +278,7 @@ class SyncManager:
         self.device.ensure_layout()
         try:
             emit(0, f"Preparing sync for {len(items)} item(s)...", is_log=True)
-            records = self._load_metadata_records()
+            records = self._load_collection_cache()
             listed_files = [
                 entry for entry in self.device.list_files() if not entry.is_dir
             ]
@@ -423,7 +517,7 @@ class SyncManager:
                 except OSError:
                     pass
 
-            self._save_metadata_records(records)
+            self._save_collection_cache(records)
             try:
                 copied = self._copy_settings_to_device()
             except Exception as exc:
@@ -557,7 +651,7 @@ class SyncManager:
         return f"{stem}{ext}"
 
     def mark_deleted_on_device(self, record_id: str) -> bool:
-        records = self._load_metadata_records()
+        records = self._load_collection_cache()
         record = records.get(record_id)
         if not record:
             return False
@@ -573,5 +667,5 @@ class SyncManager:
                 device_filename=record.device_filename,
                 collection_feeds=list(record.collection_feeds),
             )
-        self._save_metadata_records(records)
+        self._save_collection_cache(records)
         return deleted

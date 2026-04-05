@@ -49,13 +49,7 @@ from hearth.core.opds import OPDSClient, OPDSSession
 from hearth.core.settings import Settings
 from hearth.sync.device import DeviceFile, KindleDevice
 from hearth.sync.manager import SyncItem, SyncManager, SyncProgress
-from hearth.sync.metadata import (
-    SyncRecord,
-    load_metadata,
-    merge_device_files_into_records,
-    reconcile_on_device,
-    save_metadata,
-)
+from hearth.sync.metadata import SyncRecord
 
 from .workers import WorkerPool
 
@@ -113,13 +107,6 @@ class SyncRunSummary:
     deleted: int
     delete_failed: int
     failed_delete_ids: list[str]
-
-
-@dataclass(slots=True)
-class MetadataRebuildResult:
-    path: Path
-    before_count: int
-    after_count: int
 
 
 @dataclass(slots=True)
@@ -279,7 +266,6 @@ class HearthMainWindow(QMainWindow):
         self.reset_general_button = QPushButton("Reset")
         self.reset_opds_button = QPushButton("Reset")
         self.reset_kindle_button = QPushButton("Reset")
-        self.regenerate_metadata_button = QPushButton("Regenerate Metadata")
         self.reset_book_conversion_button = QPushButton("Reset")
         self.reset_comic_conversion_button = QPushButton("Reset")
         self.export_settings_button = QPushButton("Export Settings")
@@ -473,14 +459,8 @@ class HearthMainWindow(QMainWindow):
         kindle_layout.addWidget(QLabel("Device"), 1, 0)
         kindle_layout.addWidget(self.kcc_device_input, 1, 1)
         kindle_layout.addWidget(
-            self.regenerate_metadata_button,
-            1,
-            2,
-            alignment=Qt.AlignmentFlag.AlignRight,
-        )
-        kindle_layout.addWidget(
             self.reset_kindle_button,
-            1,
+            2,
             3,
             alignment=Qt.AlignmentFlag.AlignRight,
         )
@@ -604,7 +584,6 @@ class HearthMainWindow(QMainWindow):
         self.reset_general_button.clicked.connect(self._reset_general)
         self.reset_opds_button.clicked.connect(self._reset_opds)
         self.reset_kindle_button.clicked.connect(self._reset_kindle)
-        self.regenerate_metadata_button.clicked.connect(self._regenerate_metadata_file)
         self.reset_book_conversion_button.clicked.connect(self._reset_book_conversion)
         self.reset_comic_conversion_button.clicked.connect(self._reset_comic_conversion)
         self.export_settings_button.clicked.connect(self._export_settings_file)
@@ -786,162 +765,6 @@ class HearthMainWindow(QMainWindow):
         self.transport_combo.setCurrentText("auto")
         self.kindle_root_input.setText("")
         self._save_settings_to_file()
-
-    def _metadata_remote_name(self) -> str:
-        return "Hearth/.hearth_metadata.json"
-
-    def _metadata_path_for(self, device: KindleDevice) -> Path:
-        return device.documents_dir / "Hearth" / ".hearth_metadata.json"
-
-    def _load_metadata_from_device(self, device: KindleDevice) -> dict[str, SyncRecord]:
-        if device.transport != "mtp":
-            records = load_metadata(self._metadata_path_for(device))
-            try:
-                device_files = {
-                    entry.path for entry in device.list_files() if not entry.is_dir
-                }
-            except (OSError, RuntimeError):
-                return records
-            return merge_device_files_into_records(records, device_files)
-
-        with tempfile.TemporaryDirectory(prefix="hearth-metadata-") as temp_dir:
-            temp_path = Path(temp_dir) / ".hearth_metadata.json"
-            try:
-                device.download_file(self._metadata_remote_name(), temp_path)
-            except (OSError, RuntimeError):
-                records = {}
-            else:
-                records = load_metadata(temp_path)
-
-        try:
-            device_files = {
-                entry.path for entry in device.list_files() if not entry.is_dir
-            }
-        except (OSError, RuntimeError):
-            return records
-        return merge_device_files_into_records(records, device_files)
-
-    def _save_metadata_to_device(
-        self,
-        device: KindleDevice,
-        records: dict[str, SyncRecord],
-    ) -> Path:
-        metadata_path = self._metadata_path_for(device)
-        if device.transport != "mtp":
-            save_metadata(metadata_path, records)
-            return metadata_path
-
-        with tempfile.TemporaryDirectory(prefix="hearth-metadata-") as temp_dir:
-            temp_path = Path(temp_dir) / ".hearth_metadata.json"
-            save_metadata(temp_path, records)
-            device.put_file(temp_path, self._metadata_remote_name())
-        return metadata_path
-
-    def _regenerate_metadata_file(self) -> None:
-        if self.is_busy:
-            return
-
-        if self.connected_device is None:
-            QMessageBox.warning(
-                self,
-                "No Kindle",
-                "Connect and probe a Kindle before regenerating metadata.",
-            )
-            return
-
-        decision = QMessageBox.question(
-            self,
-            "Regenerate Metadata",
-            (
-                "This rebuilds Hearth metadata from currently tracked records "
-                "and files detected on the Kindle. Continue?"
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if decision != QMessageBox.StandardButton.Yes:
-            return
-
-        self._set_busy("Regenerating metadata...")
-        snapshot = self.connected_device
-        future = self.worker_pool.submit(
-            self._regenerate_metadata_worker,
-            snapshot,
-        )
-        self.pending_tasks.append(
-            PendingTask(
-                future=future,
-                on_success=self._on_regenerate_metadata_finished,
-                action_name="regenerate metadata",
-            )
-        )
-
-    def _regenerate_metadata_worker(
-        self,
-        snapshot: DeviceSnapshot,
-    ) -> MetadataRebuildResult:
-        device = KindleDevice(
-            transport=snapshot.transport,
-            root=snapshot.root,
-        )
-        metadata_path = self._metadata_path_for(device)
-        records = self._load_metadata_from_device(device)
-        before_count = len(records)
-
-        device_files: set[str] = set()
-        for entry in device.list_files():
-            if entry.is_dir:
-                continue
-            device_files.add(entry.path)
-            device_files.add(entry.name)
-            normalized = entry.path.strip("/")
-            if normalized:
-                device_files.add(normalized)
-                if normalized.startswith("documents/"):
-                    relative = normalized.removeprefix("documents/")
-                    device_files.add(relative)
-
-        reconciled = reconcile_on_device(records, device_files)
-        cleaned = {
-            key: record
-            for key, record in reconciled.items()
-            if record.desired or record.on_device
-        }
-        self._save_metadata_to_device(device, cleaned)
-        return MetadataRebuildResult(
-            path=metadata_path,
-            before_count=before_count,
-            after_count=len(cleaned),
-        )
-
-    def _on_regenerate_metadata_finished(self, result: object) -> None:
-        if not isinstance(result, MetadataRebuildResult):
-            raise TypeError("Unexpected metadata rebuild result")
-
-        self._refresh_device_library_state()
-        current = self.collections_tree.currentItem()
-        if current is not None:
-            feed_url = current.data(0, Qt.ItemDataRole.UserRole)
-            if isinstance(feed_url, str):
-                self._populate_library_table(
-                    self._books_for_feed_subtree(feed_url),
-                    allow_book_toggles=self._should_allow_book_toggles(feed_url),
-                )
-        self._refresh_all_collection_visuals()
-        self._save_collection_cache()
-        self._log(
-            "Regenerated metadata: "
-            f"{result.path} ({result.before_count} -> {result.after_count})"
-        )
-        QMessageBox.information(
-            self,
-            "Metadata Regenerated",
-            (
-                "Hearth metadata has been rebuilt.\n"
-                f"Path: {result.path}\n"
-                f"Records: {result.before_count} -> {result.after_count}"
-            ),
-        )
 
     def _reset_book_conversion(self) -> None:
         self.desired_output_combo.setCurrentText("auto")
@@ -1556,53 +1379,166 @@ class HearthMainWindow(QMainWindow):
                     device.download_file(self._collection_cache_remote_name(), path)
                 except (OSError, RuntimeError):
                     self.collection_book_cache = {}
+                    self.metadata_records = {}
                     return
                 try:
                     raw = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     self.collection_book_cache = {}
+                    self.metadata_records = {}
                     return
         else:
             path = self._collection_cache_path()
             if not path.exists():
                 self.collection_book_cache = {}
+                self.metadata_records = {}
                 return
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 self.collection_book_cache = {}
+                self.metadata_records = {}
                 return
-        loaded: dict[str, list[str]] = {}
+        
+        # Parse unified collection cache format: { "books": {...}, "collections": {...} }
+        loaded_collections: dict[str, list[str]] = {}
+        loaded_metadata: dict[str, SyncRecord] = {}
+        
         if isinstance(raw, dict):
-            for feed, ids in raw.items():
-                if not isinstance(feed, str) or not isinstance(ids, list):
+            feed_by_book_id: dict[str, set[str]] = {}
+            collections_dict = raw.get("collections", {})
+            if isinstance(collections_dict, dict):
+                for feed, raw_ids in collections_dict.items():
+                    if not isinstance(feed, str):
+                        continue
+                    if isinstance(raw_ids, dict):
+                        ids = raw_ids.get("book_ids", [])
+                    else:
+                        ids = raw_ids
+                    if not isinstance(ids, list):
+                        continue
+                    normalized_ids: list[str] = []
+                    for raw_id in ids:
+                        book_id = str(raw_id).strip()
+                        if not book_id:
+                            continue
+                        normalized_ids.append(book_id)
+                        feed_by_book_id.setdefault(book_id, set()).add(feed)
+                    loaded_collections[feed] = sorted(set(normalized_ids))
+
+            # Load books metadata
+            books_dict = raw.get("books", {})
+            if isinstance(books_dict, dict):
+                for book_id, book_data in books_dict.items():
+                    if not isinstance(book_data, dict):
+                        continue
+                    persisted_feeds = [
+                        str(f)
+                        for f in book_data.get("collection_feeds", [])
+                        if isinstance(f, str) and f.strip()
+                    ]
+                    loaded_metadata[book_id] = SyncRecord(
+                        id=book_id,
+                        title=book_data.get("title", ""),
+                        desired=bool(book_data.get("desired", False)),
+                        on_device=bool(book_data.get("on_device", False)),
+                        device_filename=str(book_data.get("device_filename", "")),
+                        collection_feeds=sorted(
+                            set(persisted_feeds).union(
+                                feed_by_book_id.get(book_id, set())
+                            )
+                        ),
+                    )
+        
+        self.collection_book_cache = loaded_collections
+        self.metadata_records = loaded_metadata
+
+    def _parse_cache_records(self, cache_data: object) -> dict[str, SyncRecord]:
+        """Parse SyncRecords from collection cache format."""
+        records: dict[str, SyncRecord] = {}
+        if not isinstance(cache_data, dict):
+            return records
+
+        feed_by_book_id: dict[str, set[str]] = {}
+        collections_dict = cache_data.get("collections", {})
+        if isinstance(collections_dict, dict):
+            for feed, raw_ids in collections_dict.items():
+                if not isinstance(feed, str):
                     continue
-                loaded[feed] = [str(book_id) for book_id in ids if str(book_id).strip()]
-        self.collection_book_cache = loaded
+                if isinstance(raw_ids, dict):
+                    ids = raw_ids.get("book_ids", [])
+                else:
+                    ids = raw_ids
+                if not isinstance(ids, list):
+                    continue
+                for raw_id in ids:
+                    book_id = str(raw_id).strip()
+                    if not book_id:
+                        continue
+                    feed_by_book_id.setdefault(book_id, set()).add(feed)
+
+        books_dict = cache_data.get("books", {})
+        if isinstance(books_dict, dict):
+            for book_id, book_data in books_dict.items():
+                if not isinstance(book_data, dict):
+                    continue
+                persisted_feeds = [
+                    str(f)
+                    for f in book_data.get("collection_feeds", [])
+                    if isinstance(f, str) and f.strip()
+                ]
+                records[book_id] = SyncRecord(
+                    id=book_id,
+                    title=book_data.get("title", ""),
+                    desired=bool(book_data.get("desired", False)),
+                    on_device=bool(book_data.get("on_device", False)),
+                    device_filename=str(book_data.get("device_filename", "")),
+                    collection_feeds=sorted(
+                        set(persisted_feeds).union(feed_by_book_id.get(book_id, set()))
+                    ),
+                )
+        return records
 
     def _save_collection_cache(self) -> None:
-        payload: dict[str, list[str]] = {}
+        # Build unified collection cache with both books metadata and collections structure
+        books_payload: dict[str, dict] = {}
+        collections_payload: dict[str, list[str]] = {
+            self._cache_key_for_feed(feed): [] for feed in self.collection_sync_feeds
+        }
 
+        # Add all metadata records to books section
         for record in self.metadata_records.values():
             if not (record.desired or record.on_device):
                 continue
-            for feed in record.collection_feeds:
-                key = self._cache_key_for_feed(feed)
-                payload.setdefault(key, []).append(record.id)
+            books_payload[record.id] = {
+                "title": record.title,
+                "desired": record.desired,
+                "on_device": record.on_device,
+                "device_filename": record.device_filename,
+            }
 
-        if payload:
-            payload = {key: sorted(set(ids)) for key, ids in payload.items() if ids}
-            self.collection_book_cache = payload
-        else:
-            # Fallback: keep only selected collection keys if metadata has no feed links.
-            slim: dict[str, list[str]] = {}
-            for feed in self.collection_sync_feeds:
-                key = self._cache_key_for_feed(feed)
-                ids = self.collection_book_cache.get(key, [])
-                if ids:
-                    slim[key] = sorted(set(ids))
-            payload = slim
-            self.collection_book_cache = slim
+        tracked_ids = {
+            record.id
+            for record in self.metadata_records.values()
+            if record.desired or record.on_device
+        }
+        for key in list(collections_payload.keys()):
+            cached_ids = self.collection_book_cache.get(key, [])
+            collections_payload[key] = sorted(
+                {
+                    str(book_id)
+                    for book_id in cached_ids
+                    if str(book_id).strip() and str(book_id) in tracked_ids
+                }
+            )
+
+        self.collection_book_cache = collections_payload
+
+        # Unified payload format
+        payload = {
+            "books": books_payload,
+            "collections": collections_payload,
+        }
 
         if self.connected_device is None or self.connected_device.transport != "mtp":
             path = self._collection_cache_path()
@@ -1811,7 +1747,6 @@ class HearthMainWindow(QMainWindow):
             transport=self.connected_device.transport,
             root=self.connected_device.root,
         )
-        self.metadata_records = self._load_metadata_from_device(device)
         self._load_collection_cache()
         try:
             entries = device.list_files()
@@ -2559,13 +2494,19 @@ class HearthMainWindow(QMainWindow):
                 )
 
         if not force_resync:
+            selected_scope_keys = {
+                self._cache_key_for_feed(feed) for feed in selected_scope_feeds
+            }
             for record in self.metadata_records.values():
                 if not (record.desired or record.on_device):
                     continue
                 if not record.collection_feeds:
                     continue
+                record_feed_keys = {
+                    self._cache_key_for_feed(feed) for feed in record.collection_feeds
+                }
                 if not any(
-                    feed in selected_scope_feeds for feed in record.collection_feeds
+                    feed in selected_scope_keys for feed in record_feed_keys
                 ):
                     continue
                 if record.id in available_selected_ids:
@@ -2695,6 +2636,8 @@ class HearthMainWindow(QMainWindow):
             workspace=workspace,
             max_conversion_workers=settings.max_conversion_workers,
             convert_pdfs=settings.convert_pdfs,
+            settings_path=self.settings_path,
+            selected_collections=settings.collection_sync_feeds,
         )
 
         if self.sync_progress_queue is not None:
@@ -3352,7 +3295,6 @@ class HearthMainWindow(QMainWindow):
         self.refresh_files_button.setEnabled(False)
         self.download_selected_file_button.setEnabled(False)
         self.delete_selected_file_button.setEnabled(False)
-        self.regenerate_metadata_button.setEnabled(False)
         self.remove_from_kindle_button.setEnabled(False)
         self.probe_kindle_button.setEnabled(False)
 
@@ -3369,7 +3311,6 @@ class HearthMainWindow(QMainWindow):
         self.refresh_files_button.setEnabled(True)
         self.download_selected_file_button.setEnabled(True)
         self.delete_selected_file_button.setEnabled(True)
-        self.regenerate_metadata_button.setEnabled(True)
         self.remove_from_kindle_button.setEnabled(True)
         self.probe_kindle_button.setEnabled(True)
 
