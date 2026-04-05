@@ -16,6 +16,7 @@ from PyQt6.QtCore import QTimer, Qt  # type: ignore[import-not-found]
 from PyQt6.QtGui import QBrush, QColor, QPalette, QIcon, QFont  # type: ignore[import-not-found]
 from PyQt6.QtWidgets import (
     QApplication,
+    QDialog,
     QMenu,
     QCheckBox,
     QComboBox,
@@ -52,6 +53,7 @@ from hearth.sync.manager import SyncItem, SyncManager, SyncProgress
 from hearth.sync.metadata import SyncRecord
 
 from .workers import WorkerPool
+from .wizard import SetupWizard
 
 
 @dataclass(slots=True)
@@ -123,6 +125,8 @@ class HearthMainWindow(QMainWindow):
         self.resize(1240, 820)
 
         self.settings_path = Path.home() / ".hearth" / "settings.json"
+        self._settings_file_existed_at_start = self.settings_path.exists()
+        self._loading_settings = False
         self.worker_pool = WorkerPool(max_workers=3)
         self.pending_tasks: list[PendingTask] = []
 
@@ -287,7 +291,31 @@ class HearthMainWindow(QMainWindow):
         self.poll_timer.start()
 
         self._load_settings_from_file()
+        self._run_first_time_setup_wizard()
         self._probe_kindle()
+
+    def _should_run_first_time_setup_wizard(self) -> bool:
+        if self._settings_file_existed_at_start:
+            return False
+        return True
+
+    def _run_first_time_setup_wizard(self) -> None:
+        if not self._should_run_first_time_setup_wizard():
+            return
+
+        wizard = SetupWizard(
+            base_settings=self._current_settings(),
+            settings_path=self.settings_path,
+            parent=self,
+        )
+        if wizard.exec() != int(QDialog.DialogCode.Accepted):
+            self._log("First-time setup wizard skipped")
+            return
+
+        configured = wizard.result_settings()
+        configured.save(self.settings_path)
+        self._load_settings_from_file()
+        self._log("First-time setup wizard completed")
 
     def _configure_layout(self) -> None:
         central = QWidget()
@@ -670,44 +698,50 @@ class HearthMainWindow(QMainWindow):
             edit.editingFinished.connect(self._save_settings_to_file)
 
     def _load_settings_from_file(self) -> None:
-        settings = Settings.load(self.settings_path)
+        self._loading_settings = True
+        try:
+            settings = Settings.load(self.settings_path)
 
-        self.feed_input.setText(settings.opds_url)
-        self.auth_mode_combo.setCurrentText(settings.auth_mode)
-        self.auth_username_input.setText(settings.auth_username)
-        self.auth_password_input.setText(settings.auth_password)
-        self.auth_bearer_input.setText(settings.auth_bearer_token)
-        self.transport_combo.setCurrentText(settings.kindle_transport)
-        self.kindle_root_input.setText(settings.kindle_mount)
+            self.feed_input.setText(settings.opds_url)
+            self.auth_mode_combo.setCurrentText(settings.auth_mode)
+            self.auth_username_input.setText(settings.auth_username)
+            self.auth_password_input.setText(settings.auth_password)
+            self.auth_bearer_input.setText(settings.auth_bearer_token)
+            self.transport_combo.setCurrentText(settings.kindle_transport)
+            self.kindle_root_input.setText(settings.kindle_mount)
 
-        output = settings.desired_output
-        if output not in {"auto", "mobi"}:
-            output = "auto"
-        self.desired_output_combo.setCurrentText(output)
+            output = settings.desired_output
+            if output not in {"auto", "mobi"}:
+                output = "auto"
+            self.desired_output_combo.setCurrentText(output)
 
-        self.kcc_command_input.setText(settings.kcc_command)
-        self._set_kcc_device_ui(settings.kcc_device)
-        self.kcc_manga_default_checkbox.setChecked(settings.kcc_manga_default)
-        self.kcc_manga_force_checkbox.setChecked(settings.kcc_manga_force)
-        self.kcc_autolevel_checkbox.setChecked(settings.kcc_autolevel)
-        self.kcc_preserve_margin_input.setValue(
-            max(0, min(100, int(settings.kcc_preserve_margin_percent)))
-        )
-        self.convert_pdfs_checkbox.setChecked(settings.convert_pdfs)
-        self.max_conversion_workers_input.setValue(
-            max(1, min(8, int(settings.max_conversion_workers)))
-        )
-        self.calibre_command_input.setText(settings.calibre_command)
-        self.collection_sync_feeds = {
-            feed.strip()
-            for feed in settings.collection_sync_feeds
-            if isinstance(feed, str) and feed.strip()
-        }
+            self.kcc_command_input.setText(settings.kcc_command)
+            self._set_kcc_device_ui(settings.kcc_device)
+            self.kcc_manga_default_checkbox.setChecked(settings.kcc_manga_default)
+            self.kcc_manga_force_checkbox.setChecked(settings.kcc_manga_force)
+            self.kcc_autolevel_checkbox.setChecked(settings.kcc_autolevel)
+            self.kcc_preserve_margin_input.setValue(
+                max(0, min(100, int(settings.kcc_preserve_margin_percent)))
+            )
+            self.convert_pdfs_checkbox.setChecked(settings.convert_pdfs)
+            self.max_conversion_workers_input.setValue(
+                max(1, min(8, int(settings.max_conversion_workers)))
+            )
+            self.calibre_command_input.setText(settings.calibre_command)
+            self.collection_sync_feeds = {
+                feed.strip()
+                for feed in settings.collection_sync_feeds
+                if isinstance(feed, str) and feed.strip()
+            }
 
-        self._update_auth_visibility()
+            self._update_auth_visibility()
+        finally:
+            self._loading_settings = False
         self._log(f"Loaded settings from {self.settings_path}")
 
     def _save_settings_to_file(self) -> None:
+        if self._loading_settings:
+            return
         settings = self._current_settings()
         settings.save(self.settings_path)
 
