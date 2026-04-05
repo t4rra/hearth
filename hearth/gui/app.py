@@ -1399,11 +1399,11 @@ class HearthMainWindow(QMainWindow):
                 self.collection_book_cache = {}
                 self.metadata_records = {}
                 return
-        
+
         # Parse unified collection cache format: { "books": {...}, "collections": {...} }
         loaded_collections: dict[str, list[str]] = {}
         loaded_metadata: dict[str, SyncRecord] = {}
-        
+
         if isinstance(raw, dict):
             feed_by_book_id: dict[str, set[str]] = {}
             collections_dict = raw.get("collections", {})
@@ -1449,7 +1449,7 @@ class HearthMainWindow(QMainWindow):
                             )
                         ),
                     )
-        
+
         self.collection_book_cache = loaded_collections
         self.metadata_records = loaded_metadata
 
@@ -2505,9 +2505,7 @@ class HearthMainWindow(QMainWindow):
                 record_feed_keys = {
                     self._cache_key_for_feed(feed) for feed in record.collection_feeds
                 }
-                if not any(
-                    feed in selected_scope_keys for feed in record_feed_keys
-                ):
+                if not any(feed in selected_scope_keys for feed in record_feed_keys):
                     continue
                 if record.id in available_selected_ids:
                     continue

@@ -142,7 +142,9 @@ class SyncManager:
         with tempfile.TemporaryDirectory(prefix="hearth-collection-cache-") as temp_dir:
             temp_path = Path(temp_dir) / ".hearth_collection_cache.json"
             try:
-                self.device.download_file(self._collection_cache_remote_name(), temp_path)
+                self.device.download_file(
+                    self._collection_cache_remote_name(), temp_path
+                )
                 raw = json.loads(temp_path.read_text(encoding="utf-8"))
                 return self._parse_cache_records(raw)
             except (OSError, RuntimeError, json.JSONDecodeError):
@@ -230,7 +232,9 @@ class SyncManager:
         if self.device.transport != "mtp":
             try:
                 self.collection_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                self.collection_cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                self.collection_cache_path.write_text(
+                    json.dumps(payload, indent=2), encoding="utf-8"
+                )
             except OSError:
                 pass
             return
