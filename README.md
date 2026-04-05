@@ -59,7 +59,7 @@ Optional: also remove Homebrew dependencies that the installer uses:
 
 ## CLI (Optional)
 
-Hearth includes a CLI (`hearth`) for automation/headless workflows. This is a leftover from development and is not the primary interface, but it can be used for scripting or debugging. May be modified or removed in the future.
+Hearth includes a CLI (`hearth`) for automation/headless workflows. This is a leftover from development and is not the primary interface, but it can be used for scripting or debugging. May not work as expected versus the GUI, and could be modified/removed in the future.
 ```
 ➜ hearth --help
 usage: hearth [-h] [--settings SETTINGS] [--workspace WORKSPACE] [--feed-url FEED_URL] [--kindle-root KINDLE_ROOT] [--force] [--dry-run]
