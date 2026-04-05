@@ -29,7 +29,7 @@ cd hearth
 - [Kindle Comic Converter (KCC)](https://github.com/ciromattia/kcc)
 - [go-mtpx](https://github.com/ganeshrvel/go-mtpx)
 
-## Uninstall (Full Removal)
+## Uninstall
 
 Run the uninstaller to remove Hearth app + Hearth data directory (`~/.hearth`):
 
@@ -43,12 +43,6 @@ Optional: also remove Homebrew dependencies that the installer uses:
 ./scripts/uninstall_Hearth.sh --remove-brew-deps
 ```
 
-## Notes
-
-- The app bundle created by this script is not signed/notarized.
-- Depending on macOS Gatekeeper behavior, first launch may still require
-  an allow/open confirmation.
-
 ## Setup
 
 1. Select your kindle device
@@ -57,9 +51,23 @@ Optional: also remove Homebrew dependencies that the installer uses:
 4. Enter your OPDS server feed URL and credentials if required
 5. It is recommend to visit the settings page and configure the rest before syncing
 
-## CLI (Optional)
+## Usage
 
-Hearth includes a CLI (`hearth`) for automation/headless workflows. This is a leftover from development and is not the primary interface, but it can be used for scripting or debugging. May not work as expected versus the GUI, and could be modified/removed in the future.
+1. Once your OPDS library has loaded, select individual books or whole collections to sync
+2. Press sync, and hope nothing goes wrong.
+3. Items from Hearth should be placed into a "Hearth" folder under `documents` on the Kindle.
+4. To remove a book, you can uncheck it from Hearth and it will be removed on sync. Books removed from collections will also be removed if said collection is synced to the Kindle.
+> Personally, I have one collection on my server for books meant for Kindle, then Hearth will sync changes when I add/remove to said collection. 
+
+## Notes
+
+- The app bundle created by this script is not signed/notarized.
+- Depending on macOS Gatekeeper behavior, first launch may still require
+  an allow/open confirmation.
+
+## CLI
+
+Hearth includes a CLI (`hearth`) for automation/headless workflows. This is a leftover from development and is not the primary interface, nor has its functionality been tested. May not work as expected versus the GUI, and could be modified/removed in the future.
 ```
 ➜ hearth --help
 usage: hearth [-h] [--settings SETTINGS] [--workspace WORKSPACE] [--feed-url FEED_URL] [--kindle-root KINDLE_ROOT] [--force] [--dry-run]
@@ -76,7 +84,7 @@ options:
   --dry-run
 ```
 
-## Development / Tests
+## Development / Testing
 
 To run the GUI from the command line, first install the dependencies in a virtual environment, then run `hearth`:
 
@@ -86,6 +94,6 @@ source .venv/bin/activate
 pip install -e .
 hearth-gui
 ```
+
 ## Disclaimer
 I made Hearth with LLMs and have only bothered to test it on my own machine (ARM Mac) with my own Kindle (Scribe 2022). It may not work for you, and there may be bugs and security issues. I probably won't be of much help either :) 
-
