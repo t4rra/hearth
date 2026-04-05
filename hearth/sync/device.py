@@ -31,6 +31,46 @@ class KindleDevice:
         return cls._mtp_backend
 
     @staticmethod
+    def _friendly_mtp_error(exc: MTPBackendError) -> str:
+        raw = str(exc).strip()
+        lowered = raw.lower()
+
+        backend_markers = [
+            "go compiler not found",
+            "go-mtpx bridge is unavailable",
+            "go-mtpx bridge source files are missing",
+            "go-mtpx bridge binary not found",
+            "go command failed",
+        ]
+        if any(marker in lowered for marker in backend_markers):
+            return (
+                "MTP backend is not ready on this machine. "
+                "Install/configure Go and libusb, then re-run install_Hearth.sh. "
+                f"Details: {raw or 'backend unavailable'}"
+            )
+
+        disconnect_markers = [
+            "no mtp storage found",
+            "mtp bridge terminated unexpectedly",
+            "no such device",
+            "connection",
+            "disconnected",
+            "timed out",
+            "broken pipe",
+        ]
+        if any(marker in lowered for marker in disconnect_markers):
+            return (
+                "Kindle appears disconnected from MTP. "
+                "Reconnect the Kindle and click Reconnect Kindle. "
+                f"Details: {raw or 'device unavailable'}"
+            )
+
+        return (
+            "MTP operation failed. If the Kindle was unplugged, reconnect it and "
+            f"retry. Details: {raw or 'unknown MTP error'}"
+        )
+
+    @staticmethod
     def _looks_like_kindle_root(path: Path) -> bool:
         if not path.exists() or not path.is_dir():
             return False
@@ -99,9 +139,15 @@ class KindleDevice:
         if preferred == "mtp":
             backend = cls.mtp_backend()
             if not backend.available():
-                raise RuntimeError("MTP backend is unavailable; install Go and libusb")
+                raise RuntimeError(
+                    "MTP backend is unavailable on this machine. "
+                    "Install/configure Go and libusb first."
+                )
             if not backend.detect_device():
-                raise RuntimeError("No MTP device detected")
+                raise RuntimeError(
+                    "No MTP Kindle device detected. Ensure the Kindle is connected "
+                    "and unlocked, then click Reconnect Kindle."
+                )
             return cls(transport="mtp", root=Path("/mtp/kindle"))
 
         return cls(transport="usb", root=Path("/tmp/hearth-usb-placeholder"))
@@ -131,7 +177,7 @@ class KindleDevice:
             try:
                 self.mtp_backend().upload_file(local_path, remote_name)
             except MTPBackendError as exc:
-                raise RuntimeError(str(exc)) from exc
+                raise RuntimeError(self._friendly_mtp_error(exc)) from exc
             return self.root / remote_name
 
         self.ensure_layout()
@@ -220,7 +266,7 @@ class KindleDevice:
                     )
                 return deleted or deleted_sdr
             except MTPBackendError as exc:
-                raise RuntimeError(str(exc)) from exc
+                raise RuntimeError(self._friendly_mtp_error(exc)) from exc
 
         path = self.documents_dir / remote_name
         deleted = False
@@ -242,7 +288,7 @@ class KindleDevice:
             try:
                 remote = self.mtp_backend().list_files()
             except MTPBackendError as exc:
-                raise RuntimeError(str(exc)) from exc
+                raise RuntimeError(self._friendly_mtp_error(exc)) from exc
 
             return [
                 DeviceFile(
@@ -281,7 +327,7 @@ class KindleDevice:
                     destination,
                 )
             except MTPBackendError as exc:
-                raise RuntimeError(str(exc)) from exc
+                raise RuntimeError(self._friendly_mtp_error(exc)) from exc
 
         source = self.documents_dir / remote_name
         destination.parent.mkdir(parents=True, exist_ok=True)

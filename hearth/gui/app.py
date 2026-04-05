@@ -470,7 +470,14 @@ class HearthMainWindow(QMainWindow):
         kindle_layout.addWidget(self.transport_combo, 0, 1)
         kindle_layout.addWidget(QLabel("Mount"), 0, 2)
         kindle_layout.addWidget(self.kindle_root_input, 0, 3)
-        kindle_layout.addWidget(self.regenerate_metadata_button, 1, 2)
+        kindle_layout.addWidget(QLabel("Device"), 1, 0)
+        kindle_layout.addWidget(self.kcc_device_input, 1, 1)
+        kindle_layout.addWidget(
+            self.regenerate_metadata_button,
+            1,
+            2,
+            alignment=Qt.AlignmentFlag.AlignRight,
+        )
         kindle_layout.addWidget(
             self.reset_kindle_button,
             1,
@@ -483,6 +490,11 @@ class HearthMainWindow(QMainWindow):
         conversion_layout = QGridLayout()
         conversion_layout.addWidget(QLabel("Concurrent conversions"), 0, 0)
         conversion_layout.addWidget(self.max_conversion_workers_input, 0, 1)
+
+        top_divider = QFrame()
+        top_divider.setFrameShape(QFrame.Shape.HLine)
+        top_divider.setFrameShadow(QFrame.Shadow.Sunken)
+        conversion_layout.addWidget(top_divider, 2, 0, 1, 4)
 
         books_label = QLabel("Books")
         books_label.setStyleSheet("font-weight: bold;")
@@ -515,8 +527,6 @@ class HearthMainWindow(QMainWindow):
         self.kcc_command_input.setPlaceholderText(
             "e.g. --manga-style --quality=80 OR /path/to/kcc-c2e"
         )
-        conversion_layout.addWidget(QLabel("KCC device"), 11, 0)
-        conversion_layout.addWidget(self.kcc_device_input, 11, 1)
         conversion_layout.addWidget(self.kcc_manga_default_checkbox, 12, 0, 1, 2)
         conversion_layout.addWidget(self.kcc_manga_force_checkbox, 12, 2, 1, 2)
         conversion_layout.addWidget(self.kcc_autolevel_checkbox, 13, 0, 1, 2)
@@ -1099,8 +1109,22 @@ class HearthMainWindow(QMainWindow):
         if result is None:
             self.connected_device = None
             if self.transport_combo.currentText() == "mtp":
-                self.kindle_status_label.setText("Kindle: MTP backend unavailable")
-                self._log("MTP selected, but go-mtpx bridge is unavailable")
+                mtp_available = KindleDevice.mtp_backend().available()
+                if mtp_available:
+                    self.kindle_status_label.setText(
+                        "Kindle: MTP device not connected"
+                    )
+                    self._log(
+                        "MTP backend is available, but no Kindle device is connected"
+                    )
+                else:
+                    self.kindle_status_label.setText(
+                        "Kindle: MTP backend not configured"
+                    )
+                    self._log(
+                        "MTP selected, but backend is not configured "
+                        "(Go/libusb/bridge missing)"
+                    )
             else:
                 self.kindle_status_label.setText("Kindle: not connected")
             self.kindle_files_tree.clear()
@@ -1434,10 +1458,6 @@ class HearthMainWindow(QMainWindow):
             self._preferred_collection_feed = None
         elif previous_current_feed:
             self._preferred_collection_feed = previous_current_feed
-        elif self.collections_tree.topLevelItemCount() > 0:
-            self.collections_tree.setCurrentItem(
-                self.collections_tree.topLevelItem(0),
-            )
         self._expand_synced_collection_paths()
         self._try_restore_preferred_collection_selection()
 
@@ -2263,7 +2283,7 @@ class HearthMainWindow(QMainWindow):
         is_resync = book_id in self.force_resync_book_ids
 
         if has_download and (on_device or pending_action == "add" or is_resync):
-            force_resync_action = menu.addAction("Force Re-sync on Sync")
+            force_resync_action = menu.addAction("Force Re-sync")
             force_resync_action.triggered.connect(
                 lambda _checked=False, bid=book_id: (
                     self._queue_book_force_resync(bid),
@@ -2935,6 +2955,12 @@ class HearthMainWindow(QMainWindow):
             listed = device.list_files()
         except (OSError, RuntimeError) as exc:
             diagnostics.append(f"list_files failed: {exc}")
+            if transport == "mtp":
+                raise RuntimeError(
+                    "Unable to read Kindle files over MTP. "
+                    "The device may have disconnected. "
+                    f"{exc}"
+                ) from exc
             return KindleFilesLoadResult(rows=rows, diagnostics=diagnostics)
 
         diagnostics.append(f"list_files count={len(listed)}")
