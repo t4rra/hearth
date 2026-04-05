@@ -16,7 +16,7 @@ cd hearth
 2. Run the installer.
 
 ```bash
-./scripts/install_macos_gui.sh
+./scripts/install_Hearth.sh
 ```
 
 3. Launch Hearth from Finder at `~/Applications/Hearth.app`.
@@ -32,34 +32,42 @@ The installer is intended to be end-to-end for GUI users.
   - `pkg-config`
   - `calibre` (cask)
 - Clones (or updates) KCC to `~/.hearth/vendor/kcc`.
+- Copies MTP bridge sources to `~/.hearth/vendor/mtpx_bridge` for reliable runtime builds.
 - Creates a private Python virtual environment at `~/.hearth/app/venv`.
 - Installs Hearth and KCC Python package dependencies into that environment.
 - Creates a Finder-launchable app bundle at `~/Applications/Hearth.app`.
+- Cleans source-tree build artifacts not needed after install (`build/`, `dist/`, `hearth.egg-info`).
+- Configures launcher environment so Homebrew tools are discoverable from Finder launches.
 
 ## Uninstall (Full Removal)
 
 Run the uninstaller to remove Hearth app + Hearth data directory (`~/.hearth`):
 
 ```bash
-./scripts/uninstall_macos_gui.sh
+./scripts/uninstall_Hearth.sh
 ```
+
+In interactive mode, the uninstaller will ask whether you want to keep
+your local settings file (`~/.hearth/settings.json`).
 
 Non-interactive mode:
 
 ```bash
-./scripts/uninstall_macos_gui.sh --yes
+./scripts/uninstall_Hearth.sh --yes
 ```
+
+`--yes` skips prompts and performs full removal of `~/.hearth`.
 
 Optional: also remove Homebrew dependencies that the installer uses:
 
 ```bash
-./scripts/uninstall_macos_gui.sh --remove-brew-deps
+./scripts/uninstall_Hearth.sh --remove-brew-deps
 ```
 
 With both options:
 
 ```bash
-./scripts/uninstall_macos_gui.sh --yes --remove-brew-deps
+./scripts/uninstall_Hearth.sh --yes --remove-brew-deps
 ```
 
 ## Notes

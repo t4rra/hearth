@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QFileDialog,
     QProgressDialog,
     QProgressBar,
     QPushButton,
@@ -275,12 +276,13 @@ class HearthMainWindow(QMainWindow):
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
 
-        self.reset_general_button = QPushButton("reset")
-        self.reset_opds_button = QPushButton("reset")
-        self.reset_kindle_button = QPushButton("reset")
+        self.reset_general_button = QPushButton("Reset")
+        self.reset_opds_button = QPushButton("Reset")
+        self.reset_kindle_button = QPushButton("Reset")
         self.regenerate_metadata_button = QPushButton("Regenerate Metadata")
-        self.reset_book_conversion_button = QPushButton("reset")
-        self.reset_comic_conversion_button = QPushButton("reset")
+        self.reset_book_conversion_button = QPushButton("Reset")
+        self.reset_comic_conversion_button = QPushButton("Reset")
+        self.export_settings_button = QPushButton("Export Settings")
         self.reset_all_button = QPushButton("Reset All Settings")
         self.remove_from_kindle_button = QPushButton("Remove Hearth Folder from Kindle")
 
@@ -419,13 +421,27 @@ class HearthMainWindow(QMainWindow):
     def _configure_settings_tab(self) -> None:
         tab_layout = QVBoxLayout()
 
+        for button in [
+            self.reset_general_button,
+            self.reset_opds_button,
+            self.reset_kindle_button,
+            self.reset_book_conversion_button,
+            self.reset_comic_conversion_button,
+        ]:
+            button.setFixedWidth(button.sizeHint().width())
+
         general_group = QGroupBox("General")
         general_layout = QGridLayout()
         general_layout.addWidget(QLabel("Workspace"), 0, 0)
         general_layout.addWidget(self.workspace_input, 0, 1, 1, 3)
         general_layout.addWidget(QLabel("Download folder"), 1, 0)
         general_layout.addWidget(self.download_dir_input, 1, 1, 1, 3)
-        general_layout.addWidget(self.reset_general_button, 2, 3)
+        general_layout.addWidget(
+            self.reset_general_button,
+            2,
+            3,
+            alignment=Qt.AlignmentFlag.AlignRight,
+        )
         general_group.setLayout(general_layout)
 
         opds_group = QGroupBox("OPDS")
@@ -440,7 +456,12 @@ class HearthMainWindow(QMainWindow):
         opds_layout.addWidget(self.auth_password_input, 2, 1)
         opds_layout.addWidget(QLabel("Bearer token"), 2, 2)
         opds_layout.addWidget(self.auth_bearer_input, 2, 3)
-        opds_layout.addWidget(self.reset_opds_button, 3, 3)
+        opds_layout.addWidget(
+            self.reset_opds_button,
+            3,
+            3,
+            alignment=Qt.AlignmentFlag.AlignRight,
+        )
         opds_group.setLayout(opds_layout)
 
         kindle_group = QGroupBox("Kindle")
@@ -450,7 +471,12 @@ class HearthMainWindow(QMainWindow):
         kindle_layout.addWidget(QLabel("Mount"), 0, 2)
         kindle_layout.addWidget(self.kindle_root_input, 0, 3)
         kindle_layout.addWidget(self.regenerate_metadata_button, 1, 2)
-        kindle_layout.addWidget(self.reset_kindle_button, 1, 3)
+        kindle_layout.addWidget(
+            self.reset_kindle_button,
+            1,
+            3,
+            alignment=Qt.AlignmentFlag.AlignRight,
+        )
         kindle_group.setLayout(kindle_layout)
 
         conversion_group = QGroupBox("Conversion")
@@ -459,7 +485,7 @@ class HearthMainWindow(QMainWindow):
         conversion_layout.addWidget(self.max_conversion_workers_input, 0, 1)
 
         books_label = QLabel("Books")
-        books_label.setStyleSheet("font-weight: bold; color: #2a2f6a;")
+        books_label.setStyleSheet("font-weight: bold;")
         conversion_layout.addWidget(books_label, 3, 0, 1, 4)
         conversion_layout.addWidget(QLabel("Preferred output"), 4, 0)
         conversion_layout.addWidget(self.desired_output_combo, 4, 1)
@@ -469,7 +495,12 @@ class HearthMainWindow(QMainWindow):
             "e.g. --mobi-keep-original-images --some-flag OR /path/to/ebook-convert"
         )
         conversion_layout.addWidget(self.convert_pdfs_checkbox, 6, 0, 1, 2)
-        conversion_layout.addWidget(self.reset_book_conversion_button, 7, 3)
+        conversion_layout.addWidget(
+            self.reset_book_conversion_button,
+            7,
+            3,
+            alignment=Qt.AlignmentFlag.AlignRight,
+        )
 
         books_divider = QFrame()
         books_divider.setFrameShape(QFrame.Shape.HLine)
@@ -477,7 +508,7 @@ class HearthMainWindow(QMainWindow):
         conversion_layout.addWidget(books_divider, 8, 0, 1, 4)
 
         comics_label = QLabel("Comics")
-        comics_label.setStyleSheet("font-weight: bold; color: #2a2f6a;")
+        comics_label.setStyleSheet("font-weight: bold;")
         conversion_layout.addWidget(comics_label, 9, 0, 1, 4)
         conversion_layout.addWidget(QLabel("Additional KCC arguments"), 10, 0)
         conversion_layout.addWidget(self.kcc_command_input, 10, 1, 1, 3)
@@ -491,10 +522,16 @@ class HearthMainWindow(QMainWindow):
         conversion_layout.addWidget(self.kcc_autolevel_checkbox, 13, 0, 1, 2)
         conversion_layout.addWidget(QLabel("Preserve margin"), 14, 0)
         conversion_layout.addWidget(self.kcc_preserve_margin_input, 14, 1)
-        conversion_layout.addWidget(self.reset_comic_conversion_button, 15, 3)
+        conversion_layout.addWidget(
+            self.reset_comic_conversion_button,
+            15,
+            3,
+            alignment=Qt.AlignmentFlag.AlignRight,
+        )
         conversion_group.setLayout(conversion_layout)
 
         footer = QHBoxLayout()
+        footer.addWidget(self.export_settings_button)
         footer.addStretch(1)
         footer.addWidget(self.remove_from_kindle_button)
         footer.addWidget(self.reset_all_button)
@@ -560,6 +597,7 @@ class HearthMainWindow(QMainWindow):
         self.regenerate_metadata_button.clicked.connect(self._regenerate_metadata_file)
         self.reset_book_conversion_button.clicked.connect(self._reset_book_conversion)
         self.reset_comic_conversion_button.clicked.connect(self._reset_comic_conversion)
+        self.export_settings_button.clicked.connect(self._export_settings_file)
         self.reset_all_button.clicked.connect(self._reset_all)
         self.remove_from_kindle_button.clicked.connect(
             self._remove_from_kindle_and_reset
@@ -567,6 +605,45 @@ class HearthMainWindow(QMainWindow):
         self.force_checkbox.toggled.connect(self._on_force_resync_toggled)
 
         self._connect_autosave()
+
+    def _export_settings_file(self) -> None:
+        self._save_settings_to_file()
+        if not self.settings_path.exists():
+            QMessageBox.warning(
+                self,
+                "Export Settings",
+                "No settings file exists yet.",
+            )
+            return
+
+        suggested = str(Path.home() / "Downloads" / "hearth-settings.json")
+        destination, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Settings",
+            suggested,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not destination:
+            return
+
+        try:
+            target = Path(destination)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(self.settings_path.read_bytes())
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "Export Failed",
+                f"Unable to export settings:\n{exc}",
+            )
+            return
+
+        self._log(f"Exported settings to {destination}")
+        QMessageBox.information(
+            self,
+            "Export Settings",
+            f"Exported settings to:\n{destination}",
+        )
 
     def _connect_autosave(self) -> None:
         for combo in [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -28,10 +29,13 @@ class LibmtpCLIBackend:
     """Persistent go-mtpx bridge backend for non-mounted MTP access."""
 
     def __init__(self) -> None:
-        self.go_cmd = shutil.which("go")
+        self.go_cmd = self._resolve_go_command()
 
-        self._bridge_dir = Path(__file__).parent / "mtpx_bridge"
-        self._bridge_bin = self._bridge_dir / ".build" / "hearth-mtpx-bridge"
+        default_hearth_home = str(Path.home() / ".hearth")
+        hearth_home = Path(os.environ.get("HEARTH_HOME", default_hearth_home))
+        self._bridge_dir = self._resolve_bridge_dir(hearth_home)
+        self._bridge_build_dir = hearth_home / "mtpx_bridge" / ".build"
+        self._bridge_bin = self._bridge_build_dir / "hearth-mtpx-bridge"
 
         self._process: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
@@ -55,11 +59,56 @@ class LibmtpCLIBackend:
             "send_cmd": str(self._bridge_bin),
             "delete_cmd": str(self._bridge_bin),
             "available": self.available(),
-            "install_hint": "Install Go + libusb and build go-mtpx bridge",
+            "install_hint": (
+                "Install Go + libusb and ensure mtpx bridge sources "
+                "exist under ~/.hearth/vendor/mtpx_bridge"
+            ),
         }
 
     def available(self) -> bool:
         return bool(self.go_cmd and self._bridge_dir.exists())
+
+    @staticmethod
+    def _resolve_go_command() -> str | None:
+        go_cmd = shutil.which("go")
+        if go_cmd:
+            return go_cmd
+
+        candidates = [
+            Path("/opt/homebrew/bin/go"),
+            Path("/usr/local/bin/go"),
+        ]
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return str(candidate)
+        return None
+
+    @staticmethod
+    def _has_bridge_sources(path: Path) -> bool:
+        required = [path / "go.mod", path / "main.go"]
+        return all(item.exists() and item.is_file() for item in required)
+
+    @classmethod
+    def _resolve_bridge_dir(cls, hearth_home: Path) -> Path:
+        env_override = os.environ.get("HEARTH_MTPX_BRIDGE_DIR", "").strip()
+        candidates: list[Path] = []
+        if env_override:
+            candidates.append(Path(env_override))
+
+        candidates.extend(
+            [
+                hearth_home / "vendor" / "mtpx_bridge",
+                Path(__file__).parent / "mtpx_bridge",
+            ]
+        )
+
+        for candidate in candidates:
+            if cls._has_bridge_sources(candidate):
+                return candidate
+
+        if env_override:
+            return Path(env_override)
+        return hearth_home / "vendor" / "mtpx_bridge"
 
     def detect_device(self) -> bool:
         now = time.time()

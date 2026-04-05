@@ -88,6 +88,7 @@ class SyncManager:
         workspace: Path,
         max_conversion_workers: int = 1,
         convert_pdfs: bool = False,
+        settings_path: Path | None = None,
     ):
         self.session = session
         self.converters = converters
@@ -95,6 +96,7 @@ class SyncManager:
         self.workspace = workspace
         self.max_conversion_workers = max(1, int(max_conversion_workers))
         self.convert_pdfs = bool(convert_pdfs)
+        self.settings_path = settings_path
 
     @property
     def metadata_path(self) -> Path:
@@ -102,6 +104,9 @@ class SyncManager:
 
     def _metadata_remote_name(self) -> str:
         return "Hearth/.hearth_metadata.json"
+
+    def _settings_remote_name(self) -> str:
+        return "Hearth/.hearth_settings.json"
 
     def _load_metadata_records(self) -> dict[str, SyncRecord]:
         if self.device.transport != "mtp":
@@ -144,6 +149,15 @@ class SyncManager:
     def _cleanup_staging_directories(self) -> None:
         for path in (self.workspace / "downloads", self.workspace / "converted"):
             shutil.rmtree(path, ignore_errors=True)
+
+    def _copy_settings_to_device(self) -> bool:
+        if self.settings_path is None:
+            return False
+        if not self.settings_path.exists() or not self.settings_path.is_file():
+            return False
+
+        self.device.put_file(self.settings_path, self._settings_remote_name())
+        return True
 
     def sync(
         self,
@@ -410,6 +424,21 @@ class SyncManager:
                     pass
 
             self._save_metadata_records(records)
+            try:
+                copied = self._copy_settings_to_device()
+            except Exception as exc:
+                emit(
+                    len(items),
+                    f"settings copy failed: {exc}",
+                    is_log=True,
+                )
+            else:
+                if copied:
+                    emit(
+                        len(items),
+                        "copied settings to Kindle: Hearth/.hearth_settings.json",
+                        is_log=True,
+                    )
             emit(
                 len(items),
                 (

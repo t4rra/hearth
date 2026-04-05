@@ -14,6 +14,8 @@ LAUNCHER_SCRIPT="$LAUNCHER_DIR/launch-hearth-gui"
 APP_EXECUTABLE="$APP_DIR/Contents/MacOS/Hearth"
 APP_PLIST="$APP_DIR/Contents/Info.plist"
 KCC_REPO_DIR="${HEARTH_KCC_REPO_DIR:-$HEARTH_HOME/vendor/kcc}"
+MTPX_BRIDGE_VENDOR_DIR="${HEARTH_MTPX_BRIDGE_VENDOR_DIR:-$HEARTH_HOME/vendor/mtpx_bridge}"
+CLEAN_REPO_ARTIFACTS="${HEARTH_CLEAN_REPO_ARTIFACTS:-1}"
 
 require_command() {
   local cmd="$1"
@@ -45,6 +47,45 @@ brew_install_cask() {
   brew install --cask "$cask"
 }
 
+calibre_installed_systemwide() {
+  if command -v ebook-convert >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local candidates=(
+    "/Applications/calibre.app/Contents/MacOS/ebook-convert"
+    "$HOME/Applications/calibre.app/Contents/MacOS/ebook-convert"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "$candidate" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+cleanup_repo_artifacts() {
+  if [[ "$CLEAN_REPO_ARTIFACTS" != "1" ]]; then
+    echo "skipping local repository cleanup (HEARTH_CLEAN_REPO_ARTIFACTS=$CLEAN_REPO_ARTIFACTS)"
+    return
+  fi
+
+  local candidates=(
+    "$REPO_ROOT/build"
+    "$REPO_ROOT/dist"
+    "$REPO_ROOT/hearth.egg-info"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -e "$candidate" ]]; then
+      rm -rf "$candidate"
+      echo "removed local build artifact: $candidate"
+    fi
+  done
+}
+
 if ! command -v brew >/dev/null 2>&1; then
   echo "error: Homebrew is required but was not found." >&2
   echo "Install Homebrew first, then re-run this installer:" >&2
@@ -58,7 +99,11 @@ require_command git "Install Git first, then re-run this installer."
 brew_install_formula go
 brew_install_formula libusb
 brew_install_formula pkg-config
-brew_install_cask calibre
+if calibre_installed_systemwide; then
+  echo "calibre already detected on this system; skipping Homebrew calibre install"
+else
+  brew_install_cask calibre
+fi
 
 mkdir -p "$INSTALL_ROOT" "$HOME/Applications" "$HEARTH_HOME/vendor"
 
@@ -79,10 +124,22 @@ fi
 
 "$VENV_DIR/bin/pip" install -e "$KCC_REPO_DIR"
 
+mkdir -p "$MTPX_BRIDGE_VENDOR_DIR"
+cp "$REPO_ROOT/hearth/sync/mtpx_bridge/go.mod" "$MTPX_BRIDGE_VENDOR_DIR/go.mod"
+cp "$REPO_ROOT/hearth/sync/mtpx_bridge/go.sum" "$MTPX_BRIDGE_VENDOR_DIR/go.sum"
+cp "$REPO_ROOT/hearth/sync/mtpx_bridge/main.go" "$MTPX_BRIDGE_VENDOR_DIR/main.go"
+
+cleanup_repo_artifacts
+
 mkdir -p "$LAUNCHER_DIR"
 cat >"$LAUNCHER_SCRIPT" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+
+export HEARTH_HOME="${HEARTH_HOME}"
+export HEARTH_MTPX_BRIDGE_DIR="${MTPX_BRIDGE_VENDOR_DIR}"
+export PATH="/opt/homebrew/bin:/usr/local/bin:\$PATH"
+
 exec "$VENV_DIR/bin/hearth-gui" "\$@"
 EOF
 chmod +x "$LAUNCHER_SCRIPT"
@@ -122,7 +179,7 @@ cat >"$APP_EXECUTABLE" <<EOF
 set -euo pipefail
 
 if [[ ! -x "$LAUNCHER_SCRIPT" ]]; then
-  /usr/bin/osascript -e 'display alert "Hearth launcher missing" message "Re-run install_macos_gui.sh to repair the installation." as critical'
+  /usr/bin/osascript -e 'display alert "Hearth launcher missing" message "Re-run scripts/install_Hearth.sh to repair the installation." as critical'
   exit 1
 fi
 
@@ -137,5 +194,6 @@ echo "  app bundle: $APP_DIR"
 echo "  install root: $INSTALL_ROOT"
 echo "  hearth home: $HEARTH_HOME"
 echo "  kcc repo: $KCC_REPO_DIR"
+echo "  mtpx bridge: $MTPX_BRIDGE_VENDOR_DIR"
 echo
 echo "Open it from Applications as: Hearth"
