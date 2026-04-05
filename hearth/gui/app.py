@@ -1111,9 +1111,7 @@ class HearthMainWindow(QMainWindow):
             if self.transport_combo.currentText() == "mtp":
                 mtp_available = KindleDevice.mtp_backend().available()
                 if mtp_available:
-                    self.kindle_status_label.setText(
-                        "Kindle: MTP device not connected"
-                    )
+                    self.kindle_status_label.setText("Kindle: MTP device not connected")
                     self._log(
                         "MTP backend is available, but no Kindle device is connected"
                     )
